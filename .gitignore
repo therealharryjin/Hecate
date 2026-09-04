@@ -1,0 +1,155 @@
+# ---------------------------------------------------------------------------
+# Secrets & vault data — MUST NEVER BE COMMITTED
+# This project is a password manager; a leak here is a real-world compromise.
+# These patterns are deliberately broad. Prefer a false positive over a leak.
+# ---------------------------------------------------------------------------
+*.vault
+*.vault.*
+vault.*
+.vault/
+vaults/
+*.kdbx
+
+# Encrypted blobs, key material, salts, recovery codes
+*.enc
+*.key
+*.keyfile
+*.pem
+*.p12
+*.pfx
+*.asc
+*.gpg
+*.salt
+*.nonce
+master.*
+recovery*.txt
+recovery*.json
+*recovery-codes*
+
+# TOTP / 2FA seeds and provisioning artifacts
+*.totp
+*totp-secret*
+*otpauth*
+*qr*.png
+
+# Environment & local config that may hold paths, tokens, or HIBP API keys
+.env
+.env.*
+!.env.example
+secrets.*
+credentials.*
+config.local.*
+.password-manager/
+.pwmanager/
+
+# Import/export dumps — CSV/JSON exports are PLAINTEXT passwords by nature
+export*.csv
+export*.json
+import*.csv
+import*.json
+*-export.*
+*-backup.*
+backups/
+*.bak
+
+# ---------------------------------------------------------------------------
+# Python
+# ---------------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Packaging / build
+build/
+dist/
+sdist/
+wheels/
+develop-eggs/
+eggs/
+.eggs/
+*.egg-info/
+*.egg
+MANIFEST
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+env/
+.python-version
+
+# ---------------------------------------------------------------------------
+# Testing, typing, linting
+# ---------------------------------------------------------------------------
+.pytest_cache/
+.cache/
+htmlcov/
+.coverage
+.coverage.*
+coverage.xml
+*.cover
+.hypothesis/
+.tox/
+.nox/
+.mypy_cache/
+.dmypy.json
+dmypy.json
+.pyre/
+.pytype/
+.ruff_cache/
+
+# ---------------------------------------------------------------------------
+# Editors & IDEs
+# ---------------------------------------------------------------------------
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.\#*
+\#*\#
+
+# ---------------------------------------------------------------------------
+# OS cruft
+# ---------------------------------------------------------------------------
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# ---------------------------------------------------------------------------
+# Logs — a stray log can capture secrets despite our best efforts
+# ---------------------------------------------------------------------------
+*.log
+logs/
+
+# ---------------------------------------------------------------------------
+# Guard: never ignore source, tests, or docs, even when a filename collides
+# with a broad secret pattern above (e.g. vault.py vs vault.enc, or
+# secrets.py vs secrets.json). Without this, source files would vanish
+# silently from `git add` with no warning.
+#
+# Files inside excluded DIRECTORIES (.venv/, __pycache__/, backups/) stay
+# excluded: git never descends into an excluded directory, so these
+# negations cannot resurrect anything from them.
+# ---------------------------------------------------------------------------
+!*.py
+!*.pyi
+!*.md
+!*.toml
+!*.cfg
+!*.ini
+
+# ---------------------------------------------------------------------------
+# Local-only agent guidance. Kept out of the repo by request.
+# MUST stay below the `!*.md` guard above — gitignore applies the LAST
+# matching pattern, so moving this up would let `!*.md` re-include it.
+# ---------------------------------------------------------------------------
+CLAUDE.md
