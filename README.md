@@ -129,11 +129,21 @@ hecate init                      # create the vault, enroll an authenticator,
 hecate unlock                    # master password, then authenticator code
 hecate add github --username me  # password is prompted for, never an argument
 hecate get github --show
+hecate edit github --username me2 --add-tag work
+hecate edit github --password    # flag takes no value: prompts, rotates history
+hecate history github            # previous passwords, masked unless --show
 hecate list
 hecate delete github
 hecate lock                      # end the session now
 hecate status                    # is it unlocked, and for how long
 ```
+
+### Editing
+
+`hecate edit` updates an entry in place, preserving its creation time and its
+password history. Changing a password with `hecate edit --password` rotates the
+old value into history rather than discarding it; `hecate history` reads it
+back. Deleting and re-adding an entry loses both.
 
 ### Sessions
 

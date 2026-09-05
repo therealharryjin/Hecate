@@ -311,6 +311,127 @@ def get_entry(ctx: click.Context, title: str, show: bool) -> None:
     click.echo(f"Modified: {entry.modified_at}")
 
 
+@cli.command()
+@click.argument("target", metavar="TITLE")
+@click.option("--title", "new_title", help="Rename the entry.")
+@click.option("--username", help="Set the username. Pass an empty string to clear it.")
+@click.option("--url", help="Set the URL.")
+@click.option("--notes", help="Set the notes.")
+@click.option(
+    "--password",
+    "change_password",
+    is_flag=True,
+    help="Prompt for a new password. Takes no value, so no secret reaches your shell history.",
+)
+@click.option("--add-tag", "add_tags", multiple=True, help="Add a tag; repeatable.")
+@click.option("--remove-tag", "remove_tags", multiple=True, help="Remove a tag; repeatable.")
+@click.pass_context
+def edit(
+    ctx: click.Context,
+    target: str,
+    new_title: str | None,
+    username: str | None,
+    url: str | None,
+    notes: str | None,
+    change_password: bool,
+    add_tags: tuple[str, ...],
+    remove_tags: tuple[str, ...],
+) -> None:
+    """Update an entry in place.
+
+    Unlike delete-then-add, this preserves the entry's creation time and its
+    password history.
+    """
+    vault, _cfg = _open_unlocked(ctx)
+    entry = vault.data.find(target)
+    if entry is None:
+        _fail(f"no entry titled {target!r}.")
+
+    requested = [
+        new_title,
+        username,
+        url,
+        notes,
+        change_password or None,
+        add_tags or None,
+        remove_tags or None,
+    ]
+    if all(value is None for value in requested):
+        _fail("nothing to change. Run 'hecate edit --help' to see the fields.")
+
+    changed: list[str] = []
+
+    if new_title is not None and new_title != entry.title:
+        clash = vault.data.find(new_title)
+        if clash is not None and clash is not entry:
+            _fail(f"an entry titled {new_title!r} already exists.")
+        entry.title = new_title
+        changed.append("title")
+
+    for field, value in (("username", username), ("url", url), ("notes", notes)):
+        if value is not None and getattr(entry, field) != value:
+            setattr(entry, field, value)
+            changed.append(field)
+
+    if add_tags or remove_tags:
+        tags = list(entry.tags)
+        for tag in add_tags:
+            if tag not in tags:
+                tags.append(tag)
+        for tag in remove_tags:
+            if tag in tags:
+                tags.remove(tag)
+        if tags != entry.tags:
+            entry.tags = tags
+            changed.append("tags")
+
+    if change_password:
+        new_password = click.prompt(
+            "New password", hide_input=True, confirmation_prompt=True
+        )
+        if new_password == entry.password:
+            click.secho(
+                "Password is unchanged; no history entry recorded.", fg="yellow"
+            )
+        else:
+            # set_password rotates the old value into history for us.
+            entry.set_password(new_password)
+            changed.append("password")
+
+    if not changed:
+        click.echo("No changes made.")
+        return
+
+    entry.touch()
+    vault.save()
+    click.secho(f"Updated {entry.title!r} ({', '.join(changed)}).", fg="green")
+
+
+@cli.command()
+@click.argument("title")
+@click.option("--show", is_flag=True, help="Reveal the passwords instead of masking them.")
+@click.pass_context
+def history(ctx: click.Context, title: str, show: bool) -> None:
+    """Show an entry's password history, newest first."""
+    vault, _cfg = _open_unlocked(ctx)
+    entry = vault.data.find(title)
+    if entry is None:
+        _fail(f"no entry titled {title!r}.")
+
+    def render(value: str) -> str:
+        return value if show else "*" * 8
+
+    click.echo(f"{entry.title}\n")
+    click.echo(f"  current   {render(entry.password)}")
+    if not entry.password_history:
+        click.echo("\n  No previous passwords recorded.")
+        return
+    for item in reversed(entry.password_history):
+        click.echo(f"  previous  {render(item.password)}   replaced {item.replaced_at}")
+    if not show:
+        click.echo("\n" + click.style("Masked; pass --show to reveal.", dim=True))
+
+
 @cli.command("list")
 @click.option("--tag", help="Only show entries carrying this tag.")
 @click.pass_context
