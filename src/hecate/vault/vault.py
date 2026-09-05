@@ -130,6 +130,26 @@ class Vault:
             env_mod.decrypt_payload(self._envelope, self._dek)
         )
 
+    def unlock_with_dek(self, dek: bytes) -> None:
+        """Open the vault from a DEK recovered from a live session.
+
+        This bypasses both factors by construction -- that is what a session
+        is. It is reachable only from a session file that the caller has
+        already validated for this vault path, expiry and permissions.
+        """
+        self._dek = dek
+        self._master_key = None
+        self._data = VaultData.deserialize(
+            env_mod.decrypt_payload(self._envelope, dek)
+        )
+
+    @property
+    def dek(self) -> bytes:
+        """The data-encryption key, for handing to the session store."""
+        if self._dek is None:
+            raise VaultLockedError("vault is locked")
+        return self._dek
+
     def lock(self) -> None:
         """Drop key material and plaintext from this object."""
         self._dek = None

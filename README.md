@@ -6,8 +6,9 @@ Named for the Greek goddess of keys, crossroads, and boundaries — the keeper o
 the keys and guardian of thresholds, which is the whole job description here.
 
 > **Status:** early. The encrypted vault core, key derivation, the two-stage
-> unlock flow and the recovery key are implemented and tested. The CLI,
-> generator, breach checking and import/export are not built yet.
+> unlock flow, the recovery key, unlock sessions and the entry commands are
+> implemented and tested. The generator, breach checking and import/export
+> are not built yet.
 
 ## Security design
 
@@ -80,6 +81,16 @@ created `0600` at `open()` time, never chmod'ed after the fact.
   unwraps the DEK on its own, with no second factor. Anyone who finds it owns
   the vault. Store it like a spare house key, not like a password hint.
 
+- **The unlock session, while it is live.** After `hecate unlock`, the
+  data-encryption key sits in a `0600` file so later commands need no
+  password. For that window, any process running as you can read the vault
+  without either factor. This is inherent to "don't ask me again for 10
+  minutes" — no amount of encrypting that file with a key stored beside it
+  would change it. Hecate binds the session to one vault, keeps the expiry
+  inside the file, refuses to load it if its permissions have been loosened,
+  and defaults the window to 10 minutes. Set `session-timeout` to `0` to opt
+  out entirely and be prompted every time.
+
 - **Secrets in process memory.** Python cannot reliably zero secrets: `str` is
   immutable and the garbage collector copies freely. Derived keys are held in
   `bytes` and dropped on lock, but a memory dump or swap file of a running,
@@ -109,6 +120,37 @@ written to disk by Hecate and cannot be regenerated or recovered afterwards.
 
 Write the recovery key down on paper and put it somewhere physically safe,
 separate from the machine holding the vault.
+
+## Usage
+
+```bash
+hecate init                      # create the vault, enroll an authenticator,
+                                 # and print the recovery key once
+hecate unlock                    # master password, then authenticator code
+hecate add github --username me  # password is prompted for, never an argument
+hecate get github --show
+hecate list
+hecate delete github
+hecate lock                      # end the session now
+hecate status                    # is it unlocked, and for how long
+```
+
+### Sessions
+
+Unlocking starts a session so you are not asked for a password and a phone on
+every command. The window is **idle** time: each command slides it forward, so
+active work does not expire mid-task while a walked-away-from terminal locks on
+schedule.
+
+```bash
+hecate config list                        # every setting, with explanations
+hecate config get session-timeout
+hecate config set session-timeout 30      # minutes
+hecate config set session-timeout 0       # disable; prompt on every command
+```
+
+The default is **10 minutes**. Settings live in `~/.hecate/config.json`
+(`0600`). See the threat model for what a live session costs you.
 
 ## Development
 
