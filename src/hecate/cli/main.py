@@ -8,6 +8,7 @@ from pathlib import Path
 import click
 
 from .. import config as config_mod
+from ..audit import duplicates
 from ..auth import session as session_mod
 from ..auth import totp as totp_auth
 from ..crypto.aead import DecryptionError
@@ -57,6 +58,38 @@ def _open_unlocked(ctx: click.Context) -> tuple[Vault, config_mod.Config]:
     if cfg.session_enabled:
         session_mod.start(path, vault.dek, cfg.session_timeout_minutes)
     return vault, cfg
+
+
+def _confirm_password_reuse(
+    vault: Vault, password: str, *, exclude: Entry | None = None
+) -> bool:
+    """Warn if this password is already in the vault. True means go ahead.
+
+    Reuse is discouraged, never blocked. The user knows things about their own
+    accounts that Hecate does not -- two entries for the same login, a throwaway
+    password on sites they do not care about -- so this is a prompt, not a rule.
+    The default is "no" because that is the safe answer when someone hits enter
+    without reading.
+    """
+    matches = duplicates.entries_sharing_password(
+        vault.data.entries, password, exclude=exclude
+    )
+    if not matches:
+        return True
+
+    noun = "entry" if len(matches) == 1 else "entries"
+    click.secho(
+        f"warning: this password is already used by {len(matches)} other {noun}:",
+        fg="yellow",
+    )
+    for entry in matches:
+        label = f"{entry.title} ({entry.username})" if entry.username else entry.title
+        click.secho(f"  - {label}", fg="yellow")
+    click.secho(
+        "Reusing it means one breach exposes every account listed above.",
+        fg="yellow",
+    )
+    return click.confirm("Use this password anyway?", default=False)
 
 
 def _describe_window(minutes: int) -> str:
@@ -273,6 +306,8 @@ def add(ctx: click.Context, title: str, username: str, url: str, notes: str, tag
     password = click.prompt(
         "Password for this entry", hide_input=True, confirmation_prompt=True
     )
+    if not _confirm_password_reuse(vault, password):
+        raise click.Abort()
     vault.add(
         Entry(
             title=title,
@@ -393,6 +428,10 @@ def edit(
             click.secho(
                 "Password is unchanged; no history entry recorded.", fg="yellow"
             )
+        elif not _confirm_password_reuse(vault, new_password, exclude=entry):
+            # Only the password is dropped; any other requested edits still
+            # apply, so declining here does not throw away the rest of the work.
+            click.secho("Password left unchanged.", fg="yellow")
         else:
             # set_password rotates the old value into history for us.
             entry.set_password(new_password)
