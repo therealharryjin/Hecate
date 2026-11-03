@@ -83,14 +83,17 @@ cannot be regenerated. See [Recovery](#recovery).
 
 | Command | Description |
 | --- | --- |
-| `hecate add TITLE` | Add an entry. Options: `--username`, `--url`, `--notes`, `--tag` (repeatable). The password is always prompted for. |
+| `hecate add TITLE` | Add an entry. Options: `--username`, `--url`, `--notes`, `--tag` (repeatable). The password is always prompted for, and you are warned before reusing one already in the vault. |
 | `hecate get TITLE` | Show an entry. The password is masked unless you pass `--show`. |
-| `hecate edit TITLE` | Update in place. Options: `--title` (rename), `--username`, `--url`, `--notes`, `--password` (flag; prompts), `--add-tag`, `--remove-tag`. |
+| `hecate edit TITLE` | Update in place. Options: `--title` (rename), `--username`, `--url`, `--notes`, `--password` (flag; prompts, and warns on reuse), `--add-tag`, `--remove-tag`. |
 | `hecate list` | List titles and usernames. `--tag` filters. Never prints passwords. |
 | `hecate history TITLE` | Show previous passwords, newest first. Masked unless `--show`. |
 | `hecate delete TITLE` | Delete an entry, after confirmation. |
 
 Entries are looked up by exact id first, then by case-insensitive title.
+
+`add` and `edit --password` check the password you typed against the ones
+already in the vault — see [Password reuse](#password-reuse).
 
 ### Settings
 
@@ -283,6 +286,42 @@ the entry's history with a timestamp, rather than discarding it. `hecate
 history` reads it back. Deleting and re-adding an entry loses both the history
 and the original creation time — that is why `edit` exists.
 
+### Password reuse
+
+When you set a password — `hecate add`, or `hecate edit --password` — Hecate
+compares it against the passwords already in the vault and, if it is already in
+use, names the entries using it before asking whether to go ahead:
+
+```
+warning: this password is already used by 2 other entries:
+  - github (harry)
+  - gitlab
+Reusing it means one breach exposes every account listed above.
+Use this password anyway? [y/N]:
+```
+
+**This is a warning, not a rule.** Answering `y` stores the duplicate. You know
+things about your accounts that Hecate does not — two entries for the same
+login, a throwaway password on a site you do not care about — so the decision
+stays yours. The prompt defaults to `N` so that hitting enter without reading
+takes the safe path; declining at `add` saves nothing and exits non-zero, while
+declining at `edit` drops only the password change and still applies any other
+edits you asked for in the same command.
+
+The warning is exact-match and case-sensitive: `Password1` and `password1` are
+different secrets and are not reported as duplicates. Entries with no password
+set are never treated as sharing one, and password *history* is not searched —
+rotating back to a password you previously retired is a different question, and
+Hecate does not currently ask it.
+
+Entry passwords are encrypted, never hashed — a password manager has to be able
+to give them back to you — so this comparison is a plain lookup over already
+decrypted data, not a cryptographic one. It runs through a keyed BLAKE2b digest
+under a per-call random pepper, which keeps raw secrets out of dict keys and
+traceback reprs. That is hygiene only: the plaintext is already in the process
+either way, and it defends against nothing an attacker could do to a running
+Hecate. The warning is never printed with the password in it.
+
 ---
 
 ## Threat model
@@ -299,6 +338,10 @@ and the original creation time — that is why `edit` exists.
 - **Casual local access** — someone who sits down at your unlocked machine, or
   watches you type the master password. This is what the authenticator code
   buys you.
+- **Password reuse across your own entries.** Setting a password that another
+  entry already uses prompts for confirmation first. It is a warning you can
+  overrule, not an enforced policy, and it is checked only at the moment you
+  set a password — there is no command that audits the whole vault yet.
 - **Password reuse against known breaches**, via Have I Been Pwned k-anonymity
   (planned). Only the first 5 characters of a SHA-1 hash ever leave the machine.
 
@@ -406,6 +449,8 @@ src/hecate/
 ├── auth/
 │   ├── totp.py      enrollment URIs and code verification, via pyotp
 │   └── session.py   the idle-window session file
+├── audit/
+│   └── duplicates.py  password-reuse detection over an unlocked vault
 ├── cli/main.py      the click app behind the `hecate` entry point
 ├── config.py        user settings, as a declarative registry
 ├── generator/       (not built yet)
@@ -453,6 +498,7 @@ Built and tested:
 - [x] Two-factor unlock flow
 - [x] Sessions with a configurable idle timeout
 - [x] Entry commands: add, get, edit, list, history, delete
+- [x] Password-reuse warning when adding or changing a password
 
 Not yet built:
 
