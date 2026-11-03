@@ -156,17 +156,23 @@ def create(
     aad = envelope.aad()
 
     k_master = kdf.derive_master_key(password, envelope.master_salt, params)
-    keyring_plain = json.dumps(
-        {"dek": _b64e(dek), "totp_secret": totp_secret}
-    ).encode("utf-8")
-    envelope.keyring = _Blob(*aead.encrypt(k_master, keyring_plain, aad))
+    envelope.keyring = _Blob(
+        *aead.encrypt(k_master, _keyring_plaintext(dek, totp_secret), aad)
+    )
 
     k_recovery = kdf.derive_recovery_key(recovery_secret, envelope.recovery_salt)
-    recovery_plain = json.dumps({"dek": _b64e(dek)}).encode("utf-8")
-    envelope.recovery = _Blob(*aead.encrypt(k_recovery, recovery_plain, aad))
+    envelope.recovery = _Blob(*aead.encrypt(k_recovery, _recovery_plaintext(dek), aad))
 
     envelope.payload = _Blob(*aead.encrypt(dek, payload, aad))
     return envelope, rng.format_recovery_key(recovery_secret)
+
+
+def _keyring_plaintext(dek: bytes, totp_secret: str | None) -> bytes:
+    return json.dumps({"dek": _b64e(dek), "totp_secret": totp_secret}).encode("utf-8")
+
+
+def _recovery_plaintext(dek: bytes) -> bytes:
+    return json.dumps({"dek": _b64e(dek)}).encode("utf-8")
 
 
 def unwrap_with_password(envelope: Envelope, password: bytes) -> Keyring:
@@ -208,5 +214,51 @@ def seal_keyring(
     Used when enrolling or removing an authenticator, which changes the
     keyring's contents but not the DEK or the payload.
     """
-    plain = json.dumps({"dek": _b64e(dek), "totp_secret": totp_secret}).encode("utf-8")
-    envelope.keyring = _Blob(*aead.encrypt(master_key, plain, envelope.aad()))
+    envelope.keyring = _Blob(
+        *aead.encrypt(master_key, _keyring_plaintext(dek, totp_secret), envelope.aad())
+    )
+
+
+def rekey_with_recovery_key(
+    envelope: Envelope,
+    recovery_key_text: str,
+    password: bytes,
+    totp_secret: str | None,
+) -> tuple[Envelope, bytes, bytes]:
+    """Put the vault under a new master password and authenticator.
+
+    Authorised by the recovery key alone, for when the authenticator is lost,
+    the master password is forgotten, or both. Returns ``(new_envelope, dek,
+    master_key)``. ``envelope`` is not modified, so a failure part-way leaves
+    the caller holding the old vault, which still opens as before.
+
+    Raises :class:`~hecate.crypto.aead.DecryptionError` if the key does not
+    open this vault, and ``ValueError`` if it is malformed.
+
+    The DEK is taken from the recovery wrap, never accepted from the caller.
+    Re-wrapping a *different* key under the recovery key would break the
+    recovery key silently, so that is made impossible rather than checked.
+
+    The master salt is regenerated, so one Argon2id guess cannot be tested
+    against an old copy of the file and the new one at once. The salt is part
+    of the header, which is every ciphertext's AAD, so all three blobs are
+    re-sealed. The DEK, recovery key, recovery salt and KDF parameters do not
+    change: the recovery key keeps working afterwards.
+    """
+    dek = unwrap_with_recovery_key(envelope, recovery_key_text)
+    payload = decrypt_payload(envelope, dek)
+    recovery_secret = rng.parse_recovery_key(recovery_key_text)
+
+    rekeyed = dataclasses.replace(envelope, master_salt=rng.generate_salt())
+    aad = rekeyed.aad()
+
+    master_key = kdf.derive_master_key(password, rekeyed.master_salt, rekeyed.params)
+    rekeyed.keyring = _Blob(
+        *aead.encrypt(master_key, _keyring_plaintext(dek, totp_secret), aad)
+    )
+
+    k_recovery = kdf.derive_recovery_key(recovery_secret, rekeyed.recovery_salt)
+    rekeyed.recovery = _Blob(*aead.encrypt(k_recovery, _recovery_plaintext(dek), aad))
+
+    rekeyed.payload = _Blob(*aead.encrypt(dek, payload, aad))
+    return rekeyed, dek, master_key

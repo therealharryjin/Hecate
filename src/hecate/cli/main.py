@@ -99,6 +99,22 @@ def _describe_window(minutes: int) -> str:
     return f"unlocked for {minutes} {unit} of inactivity"
 
 
+def _enroll_new_authenticator(unchanged_message: str) -> str:
+    """Show a fresh TOTP secret and return it once the user proves it works.
+
+    Exits with ``unchanged_message`` if the confirmation code does not verify,
+    so a mistyped secret can never lock the user out of their own vault.
+    """
+    secret = totp_auth.generate_secret()
+    account = click.prompt("Account label for the authenticator", default="hecate")
+    click.echo("\nEnroll this in your authenticator app:\n")
+    click.echo(f"  Secret: {secret}")
+    click.echo(f"  URI:    {totp_auth.provisioning_uri(secret, account)}\n")
+    if not totp_auth.verify(secret, click.prompt("Enter the current code to confirm")):
+        _fail(f"that code did not verify; {unchanged_message}")
+    return secret
+
+
 @click.group()
 @click.option("--vault", "vault_path", type=click.Path(), help="Path to the vault file.")
 @click.version_option(package_name="hecate")
@@ -125,16 +141,7 @@ def init(ctx: click.Context, no_totp: bool) -> None:
         "Choose a master password", hide_input=True, confirmation_prompt=True
     ).encode("utf-8")
 
-    secret = None
-    if not no_totp:
-        secret = totp_auth.generate_secret()
-        account = click.prompt("Account label for the authenticator", default="hecate")
-        click.echo("\nEnroll this in your authenticator app:\n")
-        click.echo(f"  Secret: {secret}")
-        click.echo(f"  URI:    {totp_auth.provisioning_uri(secret, account)}\n")
-        code = click.prompt("Enter the current code to confirm enrollment")
-        if not totp_auth.verify(secret, code):
-            _fail("that code did not verify; nothing was written.")
+    secret = None if no_totp else _enroll_new_authenticator("nothing was written.")
 
     try:
         _vault, recovery_key = Vault.create(path, password, totp_secret=secret)
@@ -178,18 +185,59 @@ def enroll_authenticator(ctx: click.Context) -> None:
     else:
         vault.complete_unlock(pending)
 
-    secret = totp_auth.generate_secret()
-    account = click.prompt("Account label for the authenticator", default="hecate")
-    click.echo("\nEnroll this in your authenticator app:\n")
-    click.echo(f"  Secret: {secret}")
-    click.echo(f"  URI:    {totp_auth.provisioning_uri(secret, account)}\n")
-    if not totp_auth.verify(secret, click.prompt("Enter the current code to confirm")):
-        _fail("that code did not verify; the vault is unchanged.")
-
+    secret = _enroll_new_authenticator("the vault is unchanged.")
     vault.enroll_totp(secret)
     vault.save()
     session_mod.clear()
     click.secho("Authenticator enrolled. Existing sessions were ended.", fg="green")
+
+
+@cli.command()
+@click.option(
+    "--no-totp",
+    is_flag=True,
+    help="Do not enroll an authenticator; unlock with the master password alone.",
+)
+@click.pass_context
+def recover(ctx: click.Context, no_totp: bool) -> None:
+    """Regain access with the recovery key.
+
+    For a lost authenticator, a forgotten master password, or both: sets a
+    master password and enrolls a new authenticator, replacing the old ones.
+    The recovery key itself does not change.
+    """
+    path = _vault_path(ctx)
+    if not path.exists():
+        _fail(f"no vault at {path}")
+
+    vault = Vault.load(path)
+    recovery_key = click.prompt("Recovery key", hide_input=True)
+    try:
+        vault.unlock_with_recovery_key(recovery_key)
+    except ValueError as exc:
+        _fail(f"{exc}; nothing was changed.")
+    except DecryptionError:
+        _fail("that recovery key does not open this vault; nothing was changed.")
+    click.secho("Recovery key accepted.", fg="green")
+
+    click.echo("Choose a master password. Your old one is fine if you still know it.")
+    password = click.prompt(
+        "New master password", hide_input=True, confirmation_prompt=True
+    ).encode("utf-8")
+    secret = None if no_totp else _enroll_new_authenticator("nothing was changed.")
+
+    vault.reset_credentials(recovery_key, password, totp_secret=secret)
+    vault.save()
+    session_mod.clear()
+
+    replaced = "Master password" if no_totp else "Master password and authenticator"
+    click.secho(f"{replaced} replaced. Existing sessions were ended.", fg="green")
+    if no_totp:
+        click.echo("This vault no longer asks for an authenticator code.")
+    click.echo(
+        "Your recovery key has not changed and still works. "
+        "Run 'hecate unlock' to open the vault."
+    )
 
 
 # --- session --------------------------------------------------------------

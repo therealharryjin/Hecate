@@ -130,6 +130,33 @@ class Vault:
             env_mod.decrypt_payload(self._envelope, self._dek)
         )
 
+    def reset_credentials(
+        self,
+        recovery_key_text: str,
+        password: bytes,
+        *,
+        totp_secret: str | None,
+    ) -> None:
+        """Replace the master password and authenticator, using the recovery key.
+
+        This grants nothing the recovery key did not already grant -- it opens
+        the vault on its own. What it adds is a way back to a vault that the
+        normal password-and-code unlock can open again.
+
+        Works from the vault as last saved: any unsaved changes on this object
+        are discarded. Raises :class:`DecryptionError` for a wrong key and
+        ``ValueError`` for a malformed one, leaving this object untouched.
+        Nothing is written until :meth:`save`.
+        """
+        envelope, dek, master_key = env_mod.rekey_with_recovery_key(
+            self._envelope, recovery_key_text, password, totp_secret
+        )
+        data = VaultData.deserialize(env_mod.decrypt_payload(envelope, dek))
+        self._envelope = envelope
+        self._dek = dek
+        self._master_key = master_key
+        self._data = data
+
     def unlock_with_dek(self, dek: bytes) -> None:
         """Open the vault from a DEK recovered from a live session.
 

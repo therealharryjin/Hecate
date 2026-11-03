@@ -264,6 +264,117 @@ def test_wrong_recovery_key_fails(vault_path):
         )
 
 
+NEW_PASSWORD = b"a new master password after recovery"
+
+
+def _vault_with_totp_and_entry(vault_path):
+    """A saved vault behind password + TOTP, holding one entry."""
+    secret = totp_auth.generate_secret()
+    vault, recovery_key = Vault.create(
+        vault_path, PASSWORD, totp_secret=secret, params=FAST
+    )
+    vault.complete_unlock(
+        vault.verify_password(PASSWORD), code=totp_auth.current_code(secret)
+    )
+    vault.add(Entry(title="github", password="hunter2"))
+    vault.save()
+    return recovery_key
+
+
+def test_reset_credentials_replaces_password_and_authenticator(vault_path):
+    """The lost-phone case: the recovery key gets you a working vault back."""
+    recovery_key = _vault_with_totp_and_entry(vault_path)
+    new_secret = totp_auth.generate_secret()
+
+    vault = Vault.load(vault_path)
+    vault.reset_credentials(recovery_key, NEW_PASSWORD, totp_secret=new_secret)
+    vault.save()
+
+    with pytest.raises(DecryptionError):
+        Vault.load(vault_path).verify_password(PASSWORD)
+
+    reopened = Vault.load(vault_path)
+    pending = reopened.verify_password(NEW_PASSWORD)
+    assert pending.requires_totp
+    reopened.complete_unlock(pending, code=totp_auth.current_code(new_secret))
+    assert reopened.data.find("github").password == "hunter2"
+
+
+def test_recovery_key_still_works_after_reset(vault_path):
+    recovery_key = _vault_with_totp_and_entry(vault_path)
+    vault = Vault.load(vault_path)
+    vault.reset_credentials(recovery_key, NEW_PASSWORD, totp_secret=None)
+    vault.save()
+
+    again = Vault.load(vault_path)
+    again.unlock_with_recovery_key(recovery_key)
+    assert again.data.find("github").password == "hunter2"
+
+
+def test_reset_without_totp_leaves_a_password_only_vault(vault_path):
+    recovery_key = _vault_with_totp_and_entry(vault_path)
+    vault = Vault.load(vault_path)
+    vault.reset_credentials(recovery_key, NEW_PASSWORD, totp_secret=None)
+    vault.save()
+
+    assert not Vault.load(vault_path).verify_password(NEW_PASSWORD).requires_totp
+
+
+def test_reset_regenerates_master_salt_only(vault_path):
+    """A new password gets a new salt; the recovery path is left as it was."""
+    recovery_key = _vault_with_totp_and_entry(vault_path)
+    before = Vault.load(vault_path)._envelope
+
+    vault = Vault.load(vault_path)
+    vault.reset_credentials(recovery_key, NEW_PASSWORD, totp_secret=None)
+    vault.save()
+    after = Vault.load(vault_path)._envelope
+
+    assert after.master_salt != before.master_salt
+    assert after.recovery_salt == before.recovery_salt
+    assert after.params == before.params
+
+
+@pytest.mark.parametrize("bad_key", ["random", "malformed"])
+def test_reset_with_a_bad_recovery_key_changes_nothing(vault_path, bad_key):
+    from hecate.crypto import rng
+
+    recovery_key = _vault_with_totp_and_entry(vault_path)
+    original = vault_path.read_bytes()
+    key = (
+        rng.format_recovery_key(rng.generate_recovery_secret())
+        if bad_key == "random"
+        else "NOT-A-KEY"
+    )
+
+    vault = Vault.load(vault_path)
+    with pytest.raises((DecryptionError, ValueError)):
+        vault.reset_credentials(key, NEW_PASSWORD, totp_secret=None)
+    assert not vault.is_unlocked
+    assert vault_path.read_bytes() == original
+
+    # The real key still works, so a typo cannot lock anyone out.
+    Vault.load(vault_path).unlock_with_recovery_key(recovery_key)
+
+
+def test_reset_vault_still_detects_tampering(vault_path):
+    """Re-sealing under the new header must keep the header bound as AAD."""
+    recovery_key = _vault_with_totp_and_entry(vault_path)
+    vault = Vault.load(vault_path)
+    vault.reset_credentials(recovery_key, NEW_PASSWORD, totp_secret=None)
+    vault.save()
+
+    document = json.loads(vault_path.read_bytes())
+    document["kdf"]["memory_cost"] = 8
+    vault_path.write_bytes(json.dumps(document).encode())
+
+    tampered = Vault.load(vault_path)
+    with pytest.raises(DecryptionError):
+        tampered.verify_password(NEW_PASSWORD)
+    with pytest.raises(DecryptionError):
+        tampered.unlock_with_recovery_key(recovery_key)
+
+
 # --- storage hygiene ------------------------------------------------------
 
 

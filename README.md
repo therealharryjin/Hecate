@@ -10,9 +10,10 @@ server, no account, no sync, and no telemetry. The only network request Hecate
 will ever make is an anonymised breach check you explicitly ask for.
 
 > **Status:** early but usable. The vault core, key derivation, the two-factor
-> unlock flow, the recovery key, unlock sessions and the entry commands are
-> implemented and tested. The generator, breach checking and import/export are
-> not built yet — see [Roadmap](#roadmap).
+> unlock flow, recovery with the recovery key, unlock sessions, the entry
+> commands and the password-reuse warning are implemented and tested. The
+> generator, breach checking and import/export are not built yet — see
+> [Roadmap](#roadmap).
 
 ---
 
@@ -69,7 +70,8 @@ cannot be regenerated. See [Recovery](#recovery).
 | Command | Description |
 | --- | --- |
 | `hecate init` | Create the vault, enroll an authenticator, print the recovery key once. `--no-totp` skips enrollment and creates a password-only vault. |
-| `hecate enroll-authenticator` | Add or replace the authenticator used to unlock the vault. Requires the master password, and ends any live session. |
+| `hecate enroll-authenticator` | Add or replace the authenticator used to unlock the vault. Requires the master password and, if one is enrolled, a code from the current authenticator — if you have lost it, use `recover`. Ends any live session. |
+| `hecate recover` | Get back in with the recovery key after losing the authenticator, forgetting the master password, or both. Sets a master password (a new one, or the old one again), enrolls a new authenticator, and ends any live session. `--no-totp` finishes with a password-only vault. The recovery key itself does not change. See [Recovery](#recovery). |
 
 ### Session
 
@@ -176,8 +178,11 @@ HKDF is the correct tool for deriving a key from an existing high-entropy
 secret. Using Argon2id there would be cargo-culting.
 
 **Why wrap rather than derive.** If the DEK were derived from your password,
-changing the password would require re-encrypting every entry. Wrapping means a
-password change only re-wraps a few dozen bytes.
+changing the password would mean a new DEK and re-encrypting every entry under
+it. Wrapping means the DEK never has to change: setting a new password with
+`hecate recover` re-wraps the same DEK. (Recovery does re-seal the entries too,
+under that same DEK, because the new password's fresh salt changes the
+authenticated header — see [Recovery](#recovery).)
 
 ### The vault file
 
@@ -367,7 +372,10 @@ Hecate. The warning is never printed with the password in it.
 
 - **The recovery key is equivalent in power to the master password.** It
   unwraps the DEK on its own, with no second factor. Anyone who finds it owns
-  the vault. Store it like a spare house key, not like a password hint.
+  the vault — and with `hecate recover` can set their own master password and
+  authenticator, shutting you out of the normal unlock (your recovery key
+  would still work). It cannot be rotated. Store it like a spare house key,
+  not like a password hint.
 
 - **The unlock session, while it is live.** After `hecate unlock`, the
   data-encryption key sits in a `0600` file so later commands need no
@@ -406,7 +414,8 @@ library, and that is a hard rule rather than a preference:
 
 ## Recovery
 
-**There is no server, no backdoor, and no reset.** Access requires either:
+**There is no server, no backdoor, and no reset without the recovery key.**
+Access requires either:
 
 1. master password **+** authenticator code, or
 2. the one-time recovery key.
@@ -429,9 +438,35 @@ It is never written to disk by Hecate and cannot be regenerated.
 Write the recovery key down on paper and put it somewhere physically safe,
 separate from the machine holding the vault.
 
-If you lose only the authenticator, unlock with the recovery key and run
-`hecate enroll-authenticator` to enroll a new device. (The CLI path for
-recovery-key unlock is still to be wired up — see [Roadmap](#roadmap).)
+### Getting back in
+
+If you lose your authenticator, forget your master password, or both:
+
+```bash
+hecate recover
+```
+
+It asks for the recovery key (hidden input; spaces, dashes and case do not
+matter), then for a master password — a new one, or your old one if you still
+know it — and then enrolls a new authenticator the same way `init` does. Pass
+`--no-totp` to finish with a password-only vault instead. Any live session is
+ended; afterwards, unlock as normal with `hecate unlock`.
+
+Nothing is written until every step has succeeded. A wrong or mistyped
+recovery key, or an authenticator code that does not verify, leaves the vault
+exactly as it was, and the old credentials keep working.
+
+What changes in the vault file: the master password gets a fresh salt, so one
+Argon2id guess cannot be tested against an old copy of the file and the new
+one at once. The salt is part of the authenticated header, so all three
+ciphertexts — keyring, recovery wrap and entries — are re-sealed under the new
+header. The DEK, the recovery salt and the Argon2id parameters stay the same.
+The old master password and the old authenticator stop working; **the same
+recovery key keeps working.**
+
+**The recovery key cannot be rotated.** Using it does not retire it, and there
+is no command to issue a new one. If you think someone else has seen it, the
+only remedy today is to create a new vault and re-add your entries to it.
 
 ## Project layout
 
@@ -499,6 +534,7 @@ Built and tested:
 - [x] Sessions with a configurable idle timeout
 - [x] Entry commands: add, get, edit, list, history, delete
 - [x] Password-reuse warning when adding or changing a password
+- [x] Recovery with the recovery key: `hecate recover`
 
 Not yet built:
 
@@ -509,4 +545,3 @@ Not yet built:
       from other managers
 - [ ] Clipboard support, which is what `clipboard-clear` is waiting on
 - [ ] Rate limiting and backoff on failed unlock attempts
-- [ ] A CLI path for unlocking with the recovery key
