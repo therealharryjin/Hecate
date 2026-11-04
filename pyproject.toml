@@ -26,5 +26,8 @@ hecate = "hecate.cli.main:cli"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+"hecate.generator" = ["eff_large_wordlist.txt"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]

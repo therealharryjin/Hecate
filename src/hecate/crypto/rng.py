@@ -10,6 +10,10 @@ from __future__ import annotations
 
 import base64
 import secrets
+from collections.abc import Sequence
+from typing import TypeVar
+
+T = TypeVar("T")
 
 KEY_SIZE = 32
 SALT_SIZE = 16
@@ -21,6 +25,16 @@ _GROUP = 4
 
 def random_bytes(count: int) -> bytes:
     return secrets.token_bytes(count)
+
+
+def below(limit: int) -> int:
+    """A uniformly random integer in ``[0, limit)``, without modulo bias."""
+    return secrets.randbelow(limit)
+
+
+def choice(options: Sequence[T]) -> T:
+    """A uniformly random element of a non-empty sequence."""
+    return secrets.choice(options)
 
 
 def generate_salt() -> bytes:

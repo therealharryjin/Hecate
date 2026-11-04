@@ -17,6 +17,9 @@ import os
 from pathlib import Path
 from typing import Any, Callable, NamedTuple
 
+from .generator import passphrase as passphrase_gen
+from .generator import password as password_gen
+
 HOME_ENV = "HECATE_HOME"
 VAULT_ENV = "HECATE_VAULT"
 
@@ -60,10 +63,43 @@ def _parse_bounded_int(low: int, high: int) -> Callable[[str], int]:
     return parse
 
 
+_TRUE = {"on", "true", "yes", "1"}
+_FALSE = {"off", "false", "no", "0"}
+
+
+def _parse_switch(raw: str) -> bool:
+    lowered = raw.strip().lower()
+    if lowered in _TRUE:
+        return True
+    if lowered in _FALSE:
+        return False
+    raise ValueError(f"expected on or off, got {raw!r}")
+
+
+def _parse_choice(*choices: str) -> Callable[[str], str]:
+    def parse(raw: str) -> str:
+        lowered = raw.strip().lower()
+        if lowered not in choices:
+            raise ValueError(f"expected one of {', '.join(choices)}, got {raw!r}")
+        return lowered
+
+    return parse
+
+
+def _show_switch(value: bool) -> str:
+    return "on" if value else "off"
+
+
+def _show_text(value: str) -> str:
+    # Quoted, so an empty value or a lone space is still visible.
+    return f"'{value}'"
+
+
 class Setting(NamedTuple):
     field: str
     parse: Callable[[str], Any]
     help: str
+    show: Callable[[Any], str] = str
 
 
 #: CLI name -> setting. The CLI surface is generated from this, so adding a
@@ -83,6 +119,70 @@ SETTINGS: dict[str, Setting] = {
         parse=_parse_bounded_int(0, MAX_CLIPBOARD_CLEAR_SECONDS),
         help="Seconds before a copied secret is cleared from the clipboard. 0 disables copying.",
     ),
+    # --- hecate generate ---------------------------------------------------
+    "generate-type": Setting(
+        field="generate_type",
+        parse=_parse_choice("password", "passphrase"),
+        help="What 'hecate generate' makes by default: password (random characters) or passphrase (random words).",
+    ),
+    "generate-save-prompt": Setting(
+        field="generate_save_prompt",
+        parse=_parse_switch,
+        help="Whether 'hecate generate' asks to save what it made into the vault. off never asks.",
+        show=_show_switch,
+    ),
+    "password-length": Setting(
+        field="password_length",
+        parse=_parse_bounded_int(password_gen.MIN_LENGTH, password_gen.MAX_LENGTH),
+        help=f"Characters in a generated password ({password_gen.MIN_LENGTH}-{password_gen.MAX_LENGTH}).",
+    ),
+    "password-uppercase": Setting(
+        field="password_uppercase",
+        parse=_parse_switch,
+        help="Use uppercase letters (A-Z) in generated passwords.",
+        show=_show_switch,
+    ),
+    "password-lowercase": Setting(
+        field="password_lowercase",
+        parse=_parse_switch,
+        help="Use lowercase letters (a-z) in generated passwords.",
+        show=_show_switch,
+    ),
+    "password-digits": Setting(
+        field="password_digits",
+        parse=_parse_switch,
+        help="Use digits (0-9) in generated passwords.",
+        show=_show_switch,
+    ),
+    "password-symbols": Setting(
+        field="password_symbols",
+        parse=password_gen.parse_symbols,
+        help="Special characters generated passwords may use. '' leaves them out. Letters, digits and spaces are refused; repeats are dropped.",
+        show=_show_text,
+    ),
+    "passphrase-words": Setting(
+        field="passphrase_words",
+        parse=_parse_bounded_int(passphrase_gen.MIN_WORDS, passphrase_gen.MAX_WORDS),
+        help=f"Words in a generated passphrase ({passphrase_gen.MIN_WORDS}-{passphrase_gen.MAX_WORDS}).",
+    ),
+    "passphrase-separator": Setting(
+        field="passphrase_separator",
+        parse=passphrase_gen.parse_separator,
+        help=f"What goes between passphrase words: up to {passphrase_gen.MAX_SEPARATOR_LENGTH} spaces or punctuation characters, or '' for nothing.",
+        show=_show_text,
+    ),
+    "passphrase-capitalize": Setting(
+        field="passphrase_capitalize",
+        parse=_parse_switch,
+        help="Capitalise the first letter of every passphrase word.",
+        show=_show_switch,
+    ),
+    "passphrase-number": Setting(
+        field="passphrase_number",
+        parse=_parse_switch,
+        help="Add one random digit to one random passphrase word, for sites that demand a number.",
+        show=_show_switch,
+    ),
 }
 
 
@@ -90,16 +190,48 @@ SETTINGS: dict[str, Setting] = {
 class Config:
     session_timeout_minutes: int = DEFAULT_SESSION_TIMEOUT_MINUTES
     clipboard_clear_seconds: int = DEFAULT_CLIPBOARD_CLEAR_SECONDS
+    generate_type: str = "password"
+    generate_save_prompt: bool = True
+    password_length: int = password_gen.DEFAULT_LENGTH
+    password_uppercase: bool = True
+    password_lowercase: bool = True
+    password_digits: bool = True
+    password_symbols: str = password_gen.DEFAULT_SYMBOLS
+    passphrase_words: int = passphrase_gen.DEFAULT_WORDS
+    passphrase_separator: str = passphrase_gen.DEFAULT_SEPARATOR
+    passphrase_capitalize: bool = False
+    passphrase_number: bool = False
 
     @property
     def session_enabled(self) -> bool:
         return self.session_timeout_minutes > 0
+
+    def password_policy(self) -> password_gen.PasswordPolicy:
+        return password_gen.PasswordPolicy(
+            length=self.password_length,
+            uppercase=self.password_uppercase,
+            lowercase=self.password_lowercase,
+            digits=self.password_digits,
+            symbols=self.password_symbols,
+        )
+
+    def passphrase_policy(self) -> passphrase_gen.PassphrasePolicy:
+        return passphrase_gen.PassphrasePolicy(
+            words=self.passphrase_words,
+            separator=self.passphrase_separator,
+            capitalize=self.passphrase_capitalize,
+            number=self.passphrase_number,
+        )
 
     def as_dict(self) -> dict[str, Any]:
         return dataclasses.asdict(self)
 
     def get(self, name: str) -> Any:
         return getattr(self, _setting(name).field)
+
+    def show(self, name: str) -> str:
+        """The value as ``config list`` and ``config get`` print it."""
+        return _setting(name).show(self.get(name))
 
     def set(self, name: str, raw: str) -> Any:
         setting = _setting(name)

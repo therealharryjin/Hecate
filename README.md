@@ -11,9 +11,9 @@ will ever make is an anonymised breach check you explicitly ask for.
 
 > **Status:** early but usable. The vault core, key derivation, the two-factor
 > unlock flow, recovery with the recovery key, unlock sessions, the entry
-> commands and the password-reuse warning are implemented and tested. The
-> generator, breach checking and import/export are not built yet — see
-> [Roadmap](#roadmap).
+> commands, the password-reuse warning and the password/passphrase generator
+> are implemented and tested. Breach checking and import/export are not built
+> yet — see [Roadmap](#roadmap).
 
 ---
 
@@ -53,6 +53,7 @@ hecate init                       # create the vault, enroll your authenticator,
                                   # and print the recovery key exactly once
 hecate unlock                     # master password, then a 6-digit code
 hecate add github --username me   # the password is prompted for, never typed as an argument
+hecate generate                   # a random password: printed, copied, and offered for saving
 hecate get github --show
 hecate list
 hecate lock                       # end the session now
@@ -97,6 +98,56 @@ Entries are looked up by exact id first, then by case-insensitive title.
 `add` and `edit --password` check the password you typed against the ones
 already in the vault — see [Password reuse](#password-reuse).
 
+### Generating passwords
+
+| Command | Description |
+| --- | --- |
+| `hecate generate` | Make a random password or passphrase, print it on a line of its own, copy it to the clipboard, and offer to save it. No vault or unlock is needed unless you save. |
+
+Every option below overrides the matching [setting](#configuration) for one
+run only:
+
+| Option | For | Effect |
+| --- | --- | --- |
+| `--password` / `--passphrase` | both | Random characters, or random words. Overrides `generate-type`. |
+| `--length N` | password | How many characters (8–128). |
+| `--uppercase` / `--no-uppercase` | password | Use `A`–`Z`, or not. |
+| `--lowercase` / `--no-lowercase` | password | Use `a`–`z`, or not. |
+| `--digits` / `--no-digits` | password | Use `0`–`9`, or not. |
+| `--symbols TEXT` / `--no-symbols` | password | The special characters to use, or none. |
+| `--words N` | passphrase | How many words (4–20). |
+| `--separator TEXT` | passphrase | What goes between words: up to 5 spaces or punctuation characters, or `''` for nothing. |
+| `--capitalize` / `--no-capitalize` | passphrase | Capitalise every word, or not. |
+| `--number` / `--no-number` | passphrase | Add one random digit to one random word, or not. |
+| `--no-copy` | both | Do not copy it to the clipboard. |
+| `--save` / `--no-save` | both | Save without being asked, or do not offer to save. |
+
+Passing an option for the other kind — `--words` while making a password, say —
+is an error rather than being silently ignored.
+
+```
+$ hecate generate
+k7#Rm2-Lq9^xWz4!pT8e
+Password: 20 characters, 125 bits of entropy.
+Copied to the clipboard; it will be cleared in 15 seconds.
+Save it to Hecate? [Y/n]:
+```
+
+**Copying and pasting.** The secret is printed alone on its own line, with no
+colour codes, so selecting that line copies exactly the password. It is also
+copied to the clipboard and cleared again after `clipboard-clear` seconds;
+setting that to `0` turns copying off. Only the secret goes to standard output
+— every other line goes to standard error — so redirecting or piping
+(`hecate generate --no-save | ...`) captures the password and nothing else.
+
+**Saving.** The save question defaults to yes, because pressing enter without
+reading should not lose a password you may already have set on a website.
+Saving unlocks the vault if no session is live, then asks for a title and an
+optional username. If an entry with that title already exists, you are asked
+whether to replace its password; the old one moves into the entry's history, as
+with `edit --password`. Turn the question off with
+`hecate config set generate-save-prompt off`; `--save` still saves on demand.
+
 ### Settings
 
 | Command | Description |
@@ -127,12 +178,33 @@ Settings live in `$HECATE_HOME/config.json`, written `0600`.
 | Setting | Default | Range | Meaning |
 | --- | --- | --- | --- |
 | `session-timeout` | `10` | 0–1440 minutes | Idle minutes before the vault re-locks. `0` disables sessions entirely, prompting on every command. |
-| `clipboard-clear` | `15` | 0–300 seconds | Seconds before a copied secret is cleared. **Currently inert** — nothing copies to the clipboard yet. |
+| `clipboard-clear` | `15` | 0–300 seconds | Seconds before a copied secret is cleared from the clipboard. `0` turns copying off, so a secret is never left there indefinitely. Only `generate` copies today. |
+| `generate-type` | `password` | `password`, `passphrase` | What `hecate generate` makes when you do not say. |
+| `generate-save-prompt` | `on` | `on`, `off` | Whether `hecate generate` asks to save what it made. |
+| `password-length` | `20` | 8–128 | Characters in a generated password. |
+| `password-uppercase` | `on` | `on`, `off` | Use `A`–`Z`. |
+| `password-lowercase` | `on` | `on`, `off` | Use `a`–`z`. |
+| `password-digits` | `on` | `on`, `off` | Use `0`–`9`. |
+| `password-symbols` | `'!#$%&*+-.:=?@^_~'` | any printable ASCII punctuation, or `''` | The special characters a generated password may use. Letters, digits and spaces are refused; repeats are dropped. |
+| `passphrase-words` | `6` | 4–20 | Words in a generated passphrase. |
+| `passphrase-separator` | `'-'` | up to 5 spaces or punctuation characters, or `''` | What goes between words. |
+| `passphrase-capitalize` | `off` | `on`, `off` | Capitalise every word. |
+| `passphrase-number` | `off` | `on`, `off` | Add one random digit to one random word. |
+
+On/off settings also accept `true`/`false`, `yes`/`no` and `1`/`0`. Text
+settings are shown in quotes, so an empty value or a single space is visible.
 
 ```bash
 hecate config set session-timeout 30
 hecate config set session-timeout 0     # maximum paranoia: always prompt
+hecate config set generate-type passphrase
+hecate config set passphrase-separator ' '
+hecate config set password-symbols '!@#$'   # single quotes, so the shell leaves ! and $ alone
 ```
+
+Each generated password always contains at least one character of every kind
+you have switched on, because many sites insist on it. Switching every kind off
+is refused when you generate, with a message saying why.
 
 Values are validated at the boundary, so a bad value is rejected with a real
 message rather than being written and failing on next read:
@@ -278,6 +350,8 @@ reliably erase on copy-on-write or log-structured filesystems.
 - Any password, in plaintext, anywhere. `test_vault_file_contains_no_plaintext`
   asserts the vault file contains no entry title, username, or password in the
   clear.
+- A generated password, unless you save it — and then only inside the
+  encrypted vault, like any other entry.
 
 Passwords are prompted for with hidden input, never accepted as command
 arguments, so they cannot leak into shell history or `ps` output. `--password`
@@ -326,6 +400,50 @@ under a per-call random pepper, which keeps raw secrets out of dict keys and
 traceback reprs. That is hygiene only: the plaintext is already in the process
 either way, and it defends against nothing an attacker could do to a running
 Hecate. The warning is never printed with the password in it.
+
+### Generating passwords and passphrases
+
+Every random choice comes from the operating system's CSPRNG through Python's
+`secrets` module, via `crypto/rng.py`. Nothing in the package imports `random`,
+and `test_random_module_is_never_imported` keeps it that way.
+
+**Passwords.** Each character is drawn uniformly from the kinds you have
+switched on. To guarantee at least one of each kind, Hecate uses rejection
+sampling: if a drawn password is missing a kind, it is thrown away and a new one
+drawn. That keeps every acceptable password equally likely. The faster shortcut
+— patching a missing character into a random position — would quietly skew the
+distribution.
+
+**Passphrases.** Words come from the
+[EFF large wordlist](https://www.eff.org/dice), shipped unmodified as
+`generator/eff_large_wordlist.txt` (SHA-256
+`addd35536511597a02fa0a9ff1e5284677b8883b83e986e43f15a3db996b903e`,
+© Electronic Frontier Foundation, CC BY 3.0 US). Its four hyphenated words
+(`drop-down`, `felt-tip`, `t-shirt`, `yo-yo`) are skipped when it is loaded so a
+`-` separator never makes a passphrase ambiguous, leaving 7,772 words. Words
+are drawn uniformly and may repeat, exactly as with dice.
+
+**The entropy figure** is log2 of the number of equally likely results your
+settings allow — a measure of the settings, not of the one value you got. For
+passwords it is counted exactly, by inclusion-exclusion over the kinds that
+must appear, and `test_count_matches_brute_force` checks that count against
+direct enumeration. For passphrases it is words × log2(7,772), about 12.9 bits
+a word; capitalising adds nothing, because every word gets it, and the optional
+digit adds log2(10 × words). With an empty separator and no capitals, word
+boundaries are invisible and a few word sequences run together into the same
+text, so the figure is a slight overstatement. Every extra bit doubles the
+guesses needed: the defaults give about 125 bits for a password and 77 for a
+passphrase.
+
+### Clipboard expiry
+
+A copied secret is always cleared again — there is no way to copy without a
+timer. Because the command exits long before the timer runs out, the clearing
+is done by a small detached helper process (`python -m hecate.clipboard`). The
+helper is never given the secret: it receives a keyed BLAKE2b fingerprint over a
+pipe (never on its command line, where other processes could see it), waits
+`clipboard-clear` seconds, and clears the clipboard only if it still holds that
+same secret. Anything you copied in the meantime is left alone.
 
 ---
 
@@ -387,6 +505,15 @@ Hecate. The warning is never printed with the password in it.
   and defaults the window to 10 minutes. Set `session-timeout` to `0` to opt
   out entirely and be prompted every time.
 
+- **The clipboard, and generated passwords on screen.** While a generated
+  password sits on the clipboard, any program running as you can read it.
+  Clearing is best effort: it replaces what is on the clipboard *now*, but it
+  cannot reach clipboard history (Windows' Win+V, desktop clipboard managers)
+  or anything you have already pasted, and if the helper process is killed
+  first, nothing is cleared. `generate` also prints the password so you can
+  copy it by hand, which leaves it in your terminal's scrollback. Use
+  `--no-copy`, or set `clipboard-clear` to `0`, to keep it off the clipboard.
+
 - **Secrets in process memory.** Python cannot reliably zero secrets: `str` is
   immutable and the garbage collector copies freely. Derived keys are held in
   `bytes` and dropped on lock, but a memory dump or swap file of a running,
@@ -411,6 +538,7 @@ library, and that is a hard rule rather than a preference:
 | HKDF-SHA256 | `cryptography` | `kdf.hkdf.HKDF` |
 | TOTP (RFC 6238) | `pyotp` | `pyotp.TOTP` |
 | Randomness | Python stdlib | `secrets` (never `random`) |
+| BLAKE2b, keyed | Python stdlib | `hashlib.blake2b` — fingerprints for the reuse warning and clipboard expiry, so raw secrets are never compared or handed around |
 
 ## Recovery
 
@@ -486,9 +614,14 @@ src/hecate/
 │   └── session.py   the idle-window session file
 ├── audit/
 │   └── duplicates.py  password-reuse detection over an unlocked vault
+├── generator/
+│   ├── password.py    character passwords: rejection sampling, exact entropy
+│   ├── passphrase.py  word passphrases from the bundled EFF wordlist
+│   ├── result.py      the Generated value; its repr never shows the secret
+│   └── eff_large_wordlist.txt
 ├── cli/main.py      the click app behind the `hecate` entry point
+├── clipboard.py     copy with a mandatory expiry; the detached clearing helper
 ├── config.py        user settings, as a declarative registry
-├── generator/       (not built yet)
 └── breach/          (not built yet)
 ```
 
@@ -535,13 +668,14 @@ Built and tested:
 - [x] Entry commands: add, get, edit, list, history, delete
 - [x] Password-reuse warning when adding or changing a password
 - [x] Recovery with the recovery key: `hecate recover`
+- [x] `hecate generate` — passwords and EFF-wordlist passphrases, configurable,
+      with exact entropy figures and an offer to save
+- [x] Clipboard copy with automatic clearing, for generated passwords
 
 Not yet built:
 
-- [ ] `hecate generate` — Diceware passphrases and character-based passwords,
-      with entropy estimates
 - [ ] `hecate check-breach` — Have I Been Pwned, k-anonymity only
 - [ ] `hecate import` / `hecate export` — encrypted backups, and CSV import
       from other managers
-- [ ] Clipboard support, which is what `clipboard-clear` is waiting on
+- [ ] Copying a stored password to the clipboard (`get --copy`)
 - [ ] Rate limiting and backoff on failed unlock attempts

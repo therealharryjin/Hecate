@@ -7,7 +7,9 @@ from pathlib import Path
 
 import click
 
+from .. import clipboard
 from .. import config as config_mod
+from .. import generator
 from ..audit import duplicates
 from ..auth import session as session_mod
 from ..auth import totp as totp_auth
@@ -298,7 +300,7 @@ def config_list() -> None:
     cfg = config_mod.load()
     width = max(len(name) for name in config_mod.SETTINGS)
     for name, setting in sorted(config_mod.SETTINGS.items()):
-        click.echo(f"{name:<{width}}  {cfg.get(name)}")
+        click.echo(f"{name:<{width}}  {cfg.show(name)}")
         click.echo(f"{'':<{width}}  {click.style(setting.help, dim=True)}")
 
 
@@ -307,7 +309,7 @@ def config_list() -> None:
 def config_get(name: str) -> None:
     """Print the value of one setting."""
     try:
-        click.echo(config_mod.load().get(name))
+        click.echo(config_mod.load().show(name))
     except KeyError as exc:
         _fail(str(exc).strip("'"))
 
@@ -327,13 +329,189 @@ def config_set(name: str, value: str) -> None:
     except ValueError as exc:
         _fail(f"{name}: {exc}")
     config_mod.save(cfg)
-    click.secho(f"{name} = {parsed}", fg="green")
+    click.secho(f"{name} = {cfg.show(name)}", fg="green")
 
     if name == "session-timeout":
         click.echo(_describe_window(parsed).capitalize() + ".")
         if parsed == 0:
             session_mod.clear()
             click.echo("Any existing session has been ended.")
+
+
+# --- generating -----------------------------------------------------------
+
+
+def _switch(value: bool | None) -> str | None:
+    return None if value is None else ("on" if value else "off")
+
+
+def _offer_to_save(
+    ctx: click.Context, secret: str, *, save: bool | None, prompt_enabled: bool
+) -> None:
+    """Store a generated secret in the vault, if the user wants it there.
+
+    The question defaults to yes. Hitting enter without reading should not
+    lose a password that may already have been set on a website.
+    """
+    if save is False or (save is None and not prompt_enabled):
+        return
+    path = _vault_path(ctx)
+    if not path.exists():
+        if save:
+            _fail(f"no vault at {path}. Run 'hecate init' first.")
+        click.secho(
+            "There is no vault yet, so it was not saved. Run 'hecate init' to create one.",
+            dim=True,
+            err=True,
+        )
+        return
+    if save is None and not click.confirm("Save it to Hecate?", default=True, err=True):
+        return
+
+    vault, _cfg = _open_unlocked(ctx)
+    title = click.prompt("Title for the entry", err=True).strip()
+    if not title:
+        _fail("a title is required; nothing was saved.")
+
+    existing = vault.data.find(title)
+    if existing is not None:
+        replace = click.confirm(
+            f"{existing.title!r} already exists. Replace its password? "
+            "The old one is kept in its history.",
+            default=False,
+            err=True,
+        )
+        if not replace or not _confirm_password_reuse(vault, secret, exclude=existing):
+            click.echo("Nothing was saved.", err=True)
+            return
+        existing.set_password(secret)
+        vault.save()
+        click.secho(
+            f"Replaced the password for {existing.title!r}; the old one is in its history.",
+            fg="green",
+            err=True,
+        )
+        return
+
+    username = click.prompt("Username (optional)", default="", show_default=False, err=True)
+    if not _confirm_password_reuse(vault, secret):
+        click.echo("Nothing was saved.", err=True)
+        return
+    vault.add(Entry(title=title, username=username, password=secret))
+    vault.save()
+    click.secho(f"Saved as {title!r}.", fg="green", err=True)
+
+
+@cli.command()
+@click.option("--password", "kind", flag_value="password", help="Make a password of random characters.")
+@click.option("--passphrase", "kind", flag_value="passphrase", help="Make a passphrase of random words.")
+@click.option("--length", type=int, help="Password: how many characters.")
+@click.option("--uppercase/--no-uppercase", default=None, help="Password: use A-Z.")
+@click.option("--lowercase/--no-lowercase", default=None, help="Password: use a-z.")
+@click.option("--digits/--no-digits", default=None, help="Password: use 0-9.")
+@click.option("--symbols", help="Password: the special characters to use.")
+@click.option("--no-symbols", is_flag=True, help="Password: no special characters.")
+@click.option("--words", type=int, help="Passphrase: how many words.")
+@click.option("--separator", help="Passphrase: what goes between words.")
+@click.option("--capitalize/--no-capitalize", default=None, help="Passphrase: capitalise each word.")
+@click.option("--number/--no-number", default=None, help="Passphrase: add one random digit.")
+@click.option("--no-copy", is_flag=True, help="Do not copy it to the clipboard.")
+@click.option("--save/--no-save", default=None, help="Save it without asking, or do not offer to.")
+@click.pass_context
+def generate(
+    ctx: click.Context,
+    kind: str | None,
+    length: int | None,
+    uppercase: bool | None,
+    lowercase: bool | None,
+    digits: bool | None,
+    symbols: str | None,
+    no_symbols: bool,
+    words: int | None,
+    separator: str | None,
+    capitalize: bool | None,
+    number: bool | None,
+    no_copy: bool,
+    save: bool | None,
+) -> None:
+    """Generate a random password or passphrase.
+
+    Defaults come from your settings ('hecate config list'); the options here
+    change them for this run only. The result is printed on a line of its own,
+    copied to the clipboard, and offered for saving into the vault.
+    """
+    if symbols is not None and no_symbols:
+        raise click.UsageError("use --symbols or --no-symbols, not both.")
+
+    cfg = config_mod.load()
+    kind = kind or cfg.generate_type
+
+    # Each override goes through its setting's own parser, so a bad value gets
+    # the same message 'hecate config set' would give.
+    overrides = {
+        "password": {
+            "--length": ("password-length", None if length is None else str(length)),
+            "--uppercase/--no-uppercase": ("password-uppercase", _switch(uppercase)),
+            "--lowercase/--no-lowercase": ("password-lowercase", _switch(lowercase)),
+            "--digits/--no-digits": ("password-digits", _switch(digits)),
+            "--symbols/--no-symbols": ("password-symbols", "" if no_symbols else symbols),
+        },
+        "passphrase": {
+            "--words": ("passphrase-words", None if words is None else str(words)),
+            "--separator": ("passphrase-separator", separator),
+            "--capitalize/--no-capitalize": ("passphrase-capitalize", _switch(capitalize)),
+            "--number/--no-number": ("passphrase-number", _switch(number)),
+        },
+    }
+    other = "passphrase" if kind == "password" else "password"
+    stray = [flag for flag, (_name, raw) in overrides[other].items() if raw is not None]
+    if stray:
+        raise click.UsageError(
+            f"{', '.join(stray)}: only for a {other}. Add --{other} to make one."
+        )
+    for flag, (name, raw) in overrides[kind].items():
+        if raw is not None:
+            try:
+                cfg.set(name, raw)
+            except ValueError as exc:
+                _fail(f"{flag}: {exc}")
+
+    try:
+        if kind == "password":
+            result = generator.generate_password(cfg.password_policy())
+            size = f"{len(result.value)} characters"
+        else:
+            result = generator.generate_passphrase(cfg.passphrase_policy())
+            size = f"{cfg.passphrase_words} words"
+    except ValueError as exc:
+        _fail(str(exc))
+
+    # The secret alone goes to stdout, on its own line, so it can be selected,
+    # piped or redirected cleanly. Everything else goes to stderr.
+    click.echo(result.value)
+    click.secho(
+        f"{kind.capitalize()}: {size}, {int(result.entropy_bits)} bits of entropy.",
+        dim=True,
+        err=True,
+    )
+
+    if not no_copy and cfg.clipboard_clear_seconds > 0:
+        try:
+            clipboard.copy(result.value, clear_after=cfg.clipboard_clear_seconds)
+        except clipboard.ClipboardUnavailable:
+            click.secho(
+                "No clipboard is available here; copy it from the line above.",
+                fg="yellow",
+                err=True,
+            )
+        else:
+            click.echo(
+                f"Copied to the clipboard; it will be cleared in "
+                f"{cfg.clipboard_clear_seconds} seconds.",
+                err=True,
+            )
+
+    _offer_to_save(ctx, result.value, save=save, prompt_enabled=cfg.generate_save_prompt)
 
 
 # --- entries --------------------------------------------------------------
