@@ -10,9 +10,9 @@ server, no account, no sync, and no telemetry. The only network request Hecate
 will ever make is an anonymised breach check you explicitly ask for.
 
 > **Status:** early but usable. The vault core, key derivation, the two-factor
-> unlock flow, recovery with the recovery key, unlock sessions, the entry
-> commands, the password-reuse warning and the password/passphrase generator
-> are implemented and tested. Breach checking and import/export are not built
+> unlock flow with backoff on failed attempts, recovery with the recovery key,
+> unlock sessions, the entry commands, the password-reuse warning and the
+> password/passphrase generator are implemented and tested. Breach checking and import/export are not built
 > yet — see [Roadmap](#roadmap).
 
 ---
@@ -71,16 +71,16 @@ cannot be regenerated. See [Recovery](#recovery).
 | Command | Description |
 | --- | --- |
 | `hecate init` | Create the vault, enroll an authenticator, print the recovery key once. `--no-totp` skips enrollment and creates a password-only vault. |
-| `hecate enroll-authenticator` | Add or replace the authenticator used to unlock the vault. Requires the master password and, if one is enrolled, a code from the current authenticator — if you have lost it, use `recover`. Ends any live session. |
-| `hecate recover` | Get back in with the recovery key after losing the authenticator, forgetting the master password, or both. Sets a master password (a new one, or the old one again), enrolls a new authenticator, and ends any live session. `--no-totp` finishes with a password-only vault. The recovery key itself does not change. See [Recovery](#recovery). |
+| `hecate enroll-authenticator` | Add or replace the authenticator used to unlock the vault. Requires the master password and, if one is enrolled, a code from the current authenticator — if you have lost it, use `recover`. Wrong answers count as [failed unlocks](#failed-unlocks). Ends any live session. |
+| `hecate recover` | Get back in with the recovery key after losing the authenticator, forgetting the master password, or both. Sets a master password (a new one, or the old one again), enrolls a new authenticator, and ends any live session. `--no-totp` finishes with a password-only vault. The recovery key itself does not change. Never makes you wait after failed unlocks, and clears their count. See [Recovery](#recovery). |
 
 ### Session
 
 | Command | Description |
 | --- | --- |
-| `hecate unlock` | Prompt for the master password, then the authenticator code, and start a session. |
+| `hecate unlock` | Prompt for the master password, then the authenticator code, and start a session. After three failures in a row, each attempt has to wait — see [Failed unlocks](#failed-unlocks). |
 | `hecate lock` | End the session immediately. |
-| `hecate status` | Show the vault path, the configured timeout, and whether the vault is unlocked and for how much longer. |
+| `hecate status` | Show the vault path, the configured timeout, any failed unlock attempts and the wait they have caused, and whether the vault is unlocked and for how much longer. |
 
 ### Entries
 
@@ -168,12 +168,13 @@ with `edit --password`. Turn the question off with
 
 | Variable | Effect |
 | --- | --- |
-| `HECATE_HOME` | Directory holding the config, default vault, and session. Defaults to `~/.hecate`. |
+| `HECATE_HOME` | Directory holding the config, default vault, session, and failed-unlock count. Defaults to `~/.hecate`. |
 | `HECATE_VAULT` | Path to the vault file, overriding the default location. |
 
 ## Configuration
 
-Settings live in `$HECATE_HOME/config.json`, written `0600`.
+Settings live in `$HECATE_HOME/config.json`, written `0600`. The backoff on
+[failed unlocks](#failed-unlocks) is deliberately not a setting.
 
 | Setting | Default | Range | Meaning |
 | --- | --- | --- | --- |
@@ -293,7 +294,11 @@ reuse under one key is catastrophic.
 ```
   1. hecate unlock
        │
+       ├─▶ still waiting after failed unlocks? ──▶ refuse before asking, stop
+       │
   2.   ├─▶ prompt: master password  (hidden input)
+       │        │
+       │        ├─▶ count the attempt as failed, before checking anything
        │        │
        │        └─▶ Argon2id ──▶ K_master ──▶ decrypt keyring
        │                                          │
@@ -305,7 +310,8 @@ reuse under one key is catastrophic.
        │        │                       (±1 time step for clock skew)
        │        └─▶ wrong or expired ──▶ refuse to open, stop
        │
-  5.   └─▶ decrypt payload with the DEK, write the session file
+  5.   └─▶ clear the failure count, decrypt payload with the DEK,
+           write the session file
 ```
 
 Unlocking is two-stage in the code (`verify_password()` then
@@ -341,6 +347,66 @@ backdating the file's mtime does nothing. On `lock`, the file's bytes are
 overwritten before it is unlinked — best-effort, since overwriting does not
 reliably erase on copy-on-write or log-structured filesystems.
 
+### Failed unlocks
+
+Hecate counts failed unlocks, and after three in a row it makes you wait before
+it will check another. The wait doubles with each further failure, up to an
+hour:
+
+| Failures in a row | Wait before the next attempt |
+| --- | --- |
+| 1–2 | none |
+| 3 | 30 seconds |
+| 4 | 1 minute |
+| 5 | 2 minutes |
+| 6 | 4 minutes |
+| 7 | 8 minutes |
+| 8 | 16 minutes |
+| 9 | 32 minutes |
+| 10 or more | 1 hour |
+
+```
+$ hecate unlock
+error: too many failed unlock attempts; try again in 30s.
+Lost the authenticator or forgotten the password? 'hecate recover' takes the recovery key and does not wait.
+```
+
+While you are waiting, Hecate refuses before asking for anything, so even the
+right password is not checked. The rules:
+
+- **An attempt counts the moment you submit a password**, before it is
+  checked, and the count is cleared only when the password *and* the code both
+  pass. A correct password with a wrong code is a failure, and so is giving up
+  at the code prompt. If a correct password reset the count, knowing your
+  password would buy unlimited guesses at the code.
+- **Counting before checking** means killing the process mid-check cannot get
+  a guess through uncounted. The count is updated under an exclusive file lock
+  (`fcntl`, on Linux and macOS), so attempts started at the same moment are all
+  counted too.
+- **`enroll-authenticator` counts the same way**, since it asks for the same
+  password and code.
+- **`recover` never waits**, and a successful recovery clears the count. The
+  recovery key is 160 bits, far too many to guess, so there is nothing to slow
+  down.
+- **Each vault has its own count**, by path. Unlocking one vault does not clear
+  another's.
+- **You are told about failures.** The next successful unlock says how many
+  failed attempts came before it, and `hecate status` shows the count and any
+  wait.
+- **It is not a setting**, on purpose. `hecate config set` works without
+  unlocking, so a setting would be an off switch for whoever is guessing.
+
+The count lives in `$HECATE_HOME/unlock-attempts.json`, written `0600`. For
+each vault path it holds a number and the time of the last failure — nothing
+you typed. If the file cannot be read, it counts as no failures: anyone able to
+corrupt it could delete it instead, so refusing to unlock would only lock you
+out. If the clock goes backwards, a wait never stretches beyond its normal
+length.
+
+This slows guessing *through Hecate's prompts* and nothing else. See the
+[threat model](#what-hecate-does-not-defend-against--read-this-part) for what
+it does not stop.
+
 ### What is never written to disk
 
 - The master password, and the key derived from it.
@@ -352,6 +418,8 @@ reliably erase on copy-on-write or log-structured filesystems.
   clear.
 - A generated password, unless you save it — and then only inside the
   encrypted vault, like any other entry.
+- Anything typed at a failed unlock. The failed-unlock record holds only a
+  count and a time for each vault.
 
 Passwords are prompted for with hidden input, never accepted as command
 arguments, so they cannot leak into shell history or `ps` output. `--password`
@@ -461,6 +529,14 @@ same secret. Anything you copied in the meantime is left alone.
 - **Casual local access** — someone who sits down at your unlocked machine, or
   watches you type the master password. This is what the authenticator code
   buys you.
+- **Guessing at Hecate's prompts.** After three failures in a row, each attempt
+  waits, doubling up to an hour, and only a full unlock resets the count — see
+  [Failed unlocks](#failed-unlocks). So someone who knows your master password
+  cannot work through the authenticator codes. A 6-digit code takes about
+  333,000 guesses on average. With no limit, each guess costs one Argon2id
+  derivation, which adds up to hours or days depending on the machine. With
+  the limit, once the wait reaches its cap, about 24 guesses a day get
+  through, and the average comes to decades.
 - **Password reuse across your own entries.** Setting a password that another
   entry already uses prompts for confirmation first. It is a warning you can
   overrule, not an enforced policy, and it is checked only at the moment you
@@ -487,6 +563,14 @@ same secret. Anything you copied in the meantime is left alone.
   hardware challenge-response (YubiKey HMAC-SHA1, FIDO2 `hmac-secret`).
   Rotating TOTP codes cannot fill that role, because verifying a rotating code
   requires storing the shared secret it rotates from.
+
+- **The failed-unlock limit is a gate, not cryptography.** It slows only the
+  guesses made through Hecate's own prompts. An attacker with a copy of the
+  vault file never sees those prompts. Anyone who can run commands as you can
+  delete `unlock-attempts.json`, or simply copy the vault file and attack it
+  offline. Against either, what protects you is the strength of the master
+  password and the cost of Argon2id. Like the authenticator code, the limit
+  raises the bar for someone at your keyboard, not for offline cracking.
 
 - **The recovery key is equivalent in power to the master password.** It
   unwraps the DEK on its own, with no second factor. Anyone who finds it owns
@@ -580,6 +664,10 @@ know it — and then enrolls a new authenticator the same way `init` does. Pass
 `--no-totp` to finish with a password-only vault instead. Any live session is
 ended; afterwards, unlock as normal with `hecate unlock`.
 
+`recover` is never held up by [failed unlocks](#failed-unlocks), so it is also
+the way back in if you are locked out waiting. A successful recovery clears the
+failed-unlock count.
+
 Nothing is written until every step has succeeded. A wrong or mistyped
 recovery key, or an authenticator code that does not verify, leaves the vault
 exactly as it was, and the old credentials keep working.
@@ -611,7 +699,8 @@ src/hecate/
 │   └── vault.py     lifecycle: create, two-stage unlock, enroll, save
 ├── auth/
 │   ├── totp.py      enrollment URIs and code verification, via pyotp
-│   └── session.py   the idle-window session file
+│   ├── session.py   the idle-window session file
+│   └── ratelimit.py backoff on failed unlocks, counted before they are checked
 ├── audit/
 │   └── duplicates.py  password-reuse detection over an unlocked vault
 ├── generator/
@@ -671,6 +760,8 @@ Built and tested:
 - [x] `hecate generate` — passwords and EFF-wordlist passphrases, configurable,
       with exact entropy figures and an offer to save
 - [x] Clipboard copy with automatic clearing, for generated passwords
+- [x] Backoff on failed unlocks, for both the master password and the
+      authenticator code
 
 Not yet built:
 
@@ -678,4 +769,3 @@ Not yet built:
 - [ ] `hecate import` / `hecate export` — encrypted backups, and CSV import
       from other managers
 - [ ] Copying a stored password to the clipboard (`get --copy`)
-- [ ] Rate limiting and backoff on failed unlock attempts
