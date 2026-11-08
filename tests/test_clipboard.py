@@ -106,6 +106,13 @@ def test_trailing_newline_from_the_backend_still_matches(board, spawned):
     assert clipboard.clear_if_unchanged(*_handoff(spawned[0]))
 
 
+def test_a_secret_ending_in_a_newline_is_still_cleared(board, spawned):
+    """Stored passwords, unlike generated ones, can end in a line break."""
+    clipboard.copy(SECRET + "\n", clear_after=15)
+    assert clipboard.clear_if_unchanged(*_handoff(spawned[0]))
+    assert board.text == ""
+
+
 def test_unreadable_clipboard_does_not_raise(monkeypatch, board, spawned):
     clipboard.copy(SECRET, clear_after=15)
 
