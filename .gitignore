@@ -6,6 +6,7 @@
 *.vault
 *.vault.*
 vault.*
+*.hecate
 .vault/
 vaults/
 *.kdbx

@@ -12,9 +12,9 @@ will ever make is an anonymised breach check you explicitly ask for.
 > **Status:** early but usable. The vault core, key derivation, the two-factor
 > unlock flow with backoff on failed attempts, recovery with the recovery key,
 > unlock sessions, the entry commands with clipboard copying, the
-> password-reuse warning, the password/passphrase generator and breach
-> checking are implemented and tested. Import/export is not built yet — see
-> [Roadmap](#roadmap).
+> password-reuse warning, the password/passphrase generator, breach checking,
+> encrypted backups and importing from other managers are implemented and
+> tested — see [Roadmap](#roadmap).
 
 ---
 
@@ -56,6 +56,8 @@ hecate unlock                     # master password, then a 6-digit code
 hecate add github --username me   # the password is prompted for, never typed as an argument
 hecate generate                   # a random password: printed, copied, and offered for saving
 hecate check-breach               # has any of your passwords turned up in a known breach?
+hecate import bitwarden.csv       # bring entries over from another password manager
+hecate export ~/backup.hecate     # an encrypted backup, under the same keys
 hecate get github --copy          # onto the clipboard, cleared again after 15 seconds
 hecate list
 hecate lock                       # end the session now
@@ -177,6 +179,16 @@ password is strong, only that it has not turned up in a breach the service
 knows about. The command exits `0` whether or not anything was found, and `1`
 if the check could not finish. See [Breach checks](#breach-checks) for exactly
 what is sent.
+
+### Backups and importing
+
+| Command | Description |
+| --- | --- |
+| `hecate export FILE` | Write an encrypted backup of the vault to `FILE`. It opens with the same master password and authenticator as the vault does now, or with the recovery key. Refuses to replace an existing file unless you pass `--force`. |
+| `hecate import FILE` | Add the entries from another password manager's CSV export, or from a Hecate backup. Shows what it will add and asks before saving. Never changes an existing entry. |
+
+There is no plaintext export: `export` only writes encrypted backups. See
+[Backups](#backups) and [Importing from other managers](#importing-from-other-managers).
 
 ### Settings
 
@@ -452,6 +464,9 @@ it does not stop.
   count and a time for each vault.
 - Anything about a breach check: no results, and no hash prefixes. See
   [Breach checks](#breach-checks) for why there is no cache.
+- A plaintext export. There is none: `export` writes encrypted backups only,
+  and `import` reads a CSV without writing its contents anywhere but the
+  encrypted vault.
 
 Passwords are prompted for with hidden input, never accepted as command
 arguments, so they cannot leak into shell history or `ps` output. `--password`
@@ -540,6 +555,74 @@ its *k-anonymity* range API. For each password:
 
 What the service learns is covered in the
 [threat model](#what-hecate-does-not-defend-against--read-this-part).
+
+### Backups
+
+`hecate export FILE` writes the vault, as last saved, to `FILE` as a complete
+vault file: the same ciphertext under the same keys. So a backup:
+
+- opens with the master password and authenticator the vault had *when the
+  backup was made*, or with the recovery key, which never changes;
+- can be opened directly (`hecate --vault FILE list`), merged back in with
+  `hecate import FILE`, or copied over a lost or damaged vault file;
+- is written atomically and `0600`, like the vault itself.
+
+The vault is unlocked before anything is written, so a vault that no longer
+decrypts is refused rather than backed up. A backup is never written over the
+vault itself, and an existing file is replaced only with `--force`.
+
+### Importing from other managers
+
+`hecate import FILE` reads a CSV export from another password manager, or a
+Hecate backup. A backup is unlocked with *its* master password (and code, if
+it has an authenticator). Those attempts count as
+[failed unlocks](#failed-unlocks) for the backup file.
+
+CSV columns are matched by name, ignoring case, spaces, underscores and
+hyphens, so exports work as they are:
+
+| Hecate field | Column names it answers to, best first |
+| --- | --- |
+| title | `title`, `name`, `item name`, `account` |
+| username | `username`, `login_username`, `user name`, `login name`, `user`, `email` |
+| password | `password`, `login_password` |
+| url | `url`, `login_uri`, `uri`, `login_url`, `website` |
+| notes | `notes`, `note`, `extra`, `comments` |
+| tags | `tags` (split on commas), or one tag from `folder`, `grouping`, `group` or `category` |
+
+Exports from Bitwarden, 1Password, LastPass, KeePassXC, Proton Pass, Chrome
+and Firefox are tested. Other exports work if their columns use these names.
+The import prints which column fed each field and which it ignored, so a
+surprise is visible before anything is saved.
+A file without a password column is refused before you are asked to unlock.
+
+- **Passwords come across exactly as exported**, spaces and all. Rows without
+  a password, such as secure notes or cards, are skipped and counted.
+- **Authenticator (TOTP) secrets are never imported.** Hecate is deliberately
+  not an authenticator app and has nowhere to keep another service's TOTP
+  secret, so columns like `totp`, `login_totp` and `otpauth` are counted,
+  reported and dropped. Keep those codes in your authenticator.
+- **A missing title** is filled in from the site's host name, then the
+  username.
+
+The merge rules are the same for CSVs and backups:
+
+- An entry with the same title (ignoring case and a trailing number like
+  `(2)`), username and password as one already in the vault is skipped, so
+  importing the same file twice adds nothing.
+- An entry whose title is taken is added under the next free number,
+  `github (2)`, so nothing is overwritten and nothing is lost.
+- Existing entries are never changed. Every added entry gets a new id; its
+  notes, tags, timestamps and password history come across unchanged.
+- Nothing is saved until you confirm. Afterwards, Hecate warns if any imported
+  entry shares its password with another entry.
+
+**The CSV you imported from still holds every password in plain text.** After
+an import, Hecate offers to delete it, defaulting to no so you can check the
+import first. Deleting overwrites the file with zeros before removing it, but
+that is best effort: it does not reliably erase data on SSDs or
+copy-on-write filesystems, and it cannot reach copies in backups, sync folders
+or the trash.
 
 ### Generating passwords and passphrases
 
@@ -673,6 +756,15 @@ same secret. Anything you copied in the meantime is left alone. Both
   copy it by hand, which leaves it in your terminal's scrollback. Use
   `--no-copy`, or set `clipboard-clear` to `0`, to keep it off the clipboard.
 
+- **Backups, and the files you import from.** A backup is exactly as strong as
+  the vault it came from, so store it like the vault. It keeps opening with
+  the master password it was made under, even after `recover` sets a new one,
+  and with the recovery key for good: retiring a password does not retire old
+  backups. A CSV export from another manager is plain text from the moment
+  that manager writes it. Hecate offers to delete it after importing, but
+  deletion is best effort, and copies in backups, sync folders or the trash
+  are out of its reach.
+
 - **What a breach check tells the service.** Have I Been Pwned (served through
   Cloudflare) sees your IP address and the 5-character prefix of each
   password's SHA-1 hash. For a password that is *not* in a breach, the prefix
@@ -706,7 +798,7 @@ library, and that is a hard rule rather than a preference:
 | HKDF-SHA256 | `cryptography` | `kdf.hkdf.HKDF` |
 | TOTP (RFC 6238) | `pyotp` | `pyotp.TOTP` |
 | Randomness | Python stdlib | `secrets` (never `random`) |
-| BLAKE2b, keyed | Python stdlib | `hashlib.blake2b` — fingerprints for the reuse warning and clipboard expiry, so raw secrets are never compared or handed around |
+| BLAKE2b, keyed | Python stdlib | `hashlib.blake2b` — fingerprints for the reuse warning, import de-duplication and clipboard expiry, so raw secrets are never compared or handed around |
 | SHA-1 | Python stdlib | `hashlib.sha1(usedforsecurity=False)` — only to look passwords up in Have I Been Pwned, whose list is keyed by it. It protects nothing. |
 | TLS | `requests` (urllib3, `certifi` CA bundle) | Breach checks only. Certificate verification is never turned off. |
 
@@ -754,6 +846,10 @@ ended; afterwards, unlock as normal with `hecate unlock`.
 the way back in if you are locked out waiting. A successful recovery clears the
 failed-unlock count.
 
+[Backups](#backups) made with `hecate export` open with the recovery key too.
+After a recovery they still open with the *old* master password as well, so a
+backup taken before you recovered is only as safe as that old password.
+
 Nothing is written until every step has succeeded. A wrong or mistyped
 recovery key, or an authenticator code that does not verify, leaves the vault
 exactly as it was, and the old credentials keep working.
@@ -782,7 +878,7 @@ src/hecate/
 │   ├── envelope.py  the key hierarchy: wrapping, unwrapping, header binding
 │   ├── model.py     Entry and VaultData; password history lives here
 │   ├── storage.py   atomic writes, fsync, 0600 at open() time
-│   └── vault.py     lifecycle: create, two-stage unlock, enroll, save
+│   └── vault.py     lifecycle: create, two-stage unlock, enroll, save, back up
 ├── auth/
 │   ├── totp.py      enrollment URIs and code verification, via pyotp
 │   ├── session.py   the idle-window session file
@@ -797,6 +893,9 @@ src/hecate/
 ├── cli/main.py      the click app behind the `hecate` entry point
 ├── clipboard.py     copy with a mandatory expiry; the detached clearing helper
 ├── config.py        user settings, as a declarative registry
+├── transfer/
+│   ├── csv_import.py  other managers' CSV exports, matched by column name; never TOTP
+│   └── merge.py       what an import adds: skips duplicates, numbers taken titles
 └── breach/
     └── hibp.py      Have I Been Pwned range lookups: 5-character prefixes only, no cache
 ```
@@ -834,6 +933,9 @@ proves very little:
 Tests use a deliberately weak Argon2 profile (`FAST_ARGON2_FOR_TESTS`) so the
 suite stays fast. It is never used for a real vault.
 
+No test reaches the network: `tests/conftest.py` makes any real HTTP request
+fail the test, and the breach tests use a fake service instead.
+
 ## Roadmap
 
 Built and tested:
@@ -851,8 +953,8 @@ Built and tested:
       authenticator code
 - [x] Copying a stored password to the clipboard (`get --copy`)
 - [x] `hecate check-breach` — Have I Been Pwned, k-anonymity only
-
-Not yet built:
-
-- [ ] `hecate import` / `hecate export` — encrypted backups, and CSV import
+- [x] `hecate import` / `hecate export` — encrypted backups, and CSV import
       from other managers
+
+Everything originally planned is built. Not offered: a plaintext (CSV)
+export.

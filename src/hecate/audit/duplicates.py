@@ -62,4 +62,20 @@ def entries_sharing_password(
     ]
 
 
-__all__ = ["entries_sharing_password"]
+def entries_with_shared_passwords(entries: Iterable[Entry]) -> list[Entry]:
+    """Return every entry whose password at least one other entry also uses.
+
+    One pass with one pepper, for checking many entries at once (an import)
+    where calling :func:`entries_sharing_password` per entry would be quadratic.
+    The same rules apply: exact match, empty passwords never count.
+    """
+    entries = [entry for entry in entries if entry.password]
+    pepper = rng.random_bytes(_PEPPER_SIZE)
+    prints = [_fingerprint(entry.password, pepper) for entry in entries]
+    counts: dict[bytes, int] = {}
+    for fingerprint in prints:
+        counts[fingerprint] = counts.get(fingerprint, 0) + 1
+    return [entry for entry, fp in zip(entries, prints) if counts[fp] > 1]
+
+
+__all__ = ["entries_sharing_password", "entries_with_shared_passwords"]

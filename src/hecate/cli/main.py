@@ -17,6 +17,7 @@ from ..breach import hibp
 from ..auth import session as session_mod
 from ..auth import totp as totp_auth
 from ..crypto.aead import DecryptionError
+from ..transfer import csv_import, merge
 from ..vault.model import Entry
 from ..vault.vault import InvalidTotpCodeError, Vault, VaultError
 
@@ -52,7 +53,12 @@ def _fail_attempt(path: Path, message: str) -> None:
     _fail(message)
 
 
-def _authenticate(path: Path, vault: Vault, code_prompt: str = "Authenticator code") -> None:
+def _authenticate(
+    path: Path,
+    vault: Vault,
+    code_prompt: str = "Authenticator code",
+    password_prompt: str = "Master password",
+) -> None:
     """Take the master password and authenticator code, counting the attempt.
 
     The attempt is counted as failed before either factor is checked, and
@@ -63,7 +69,7 @@ def _authenticate(path: Path, vault: Vault, code_prompt: str = "Authenticator co
     if wait > 0:
         _fail_throttled(wait)
 
-    password = click.prompt("Master password", hide_input=True).encode("utf-8")
+    password = click.prompt(password_prompt, hide_input=True).encode("utf-8")
     try:
         earlier_failures = ratelimit.begin(path)
     except ratelimit.Throttled as exc:  # another process failed meanwhile
@@ -811,6 +817,155 @@ def delete(ctx: click.Context, title: str) -> None:
     vault.remove(entry)
     vault.save()
     click.secho(f"Deleted {title!r}.", fg="green")
+
+
+# --- import and export ----------------------------------------------------
+
+
+def _plural(count: int, noun: str, plural: str | None = None) -> str:
+    return f"{count} {noun}" if count == 1 else f"{count} {plural or noun + 's'}"
+
+
+@cli.command()
+@click.argument("destination", type=click.Path(dir_okay=False, path_type=Path))
+@click.option("--force", is_flag=True, help="Replace DESTINATION if it already exists.")
+@click.pass_context
+def export(ctx: click.Context, destination: Path, force: bool) -> None:
+    """Write an encrypted backup of the vault to DESTINATION.
+
+    The backup is a complete vault file: it opens with the same master
+    password and authenticator as the vault does now, or with the recovery
+    key. Nothing is ever exported in plain text.
+    """
+    path = _vault_path(ctx)
+    if destination.resolve() == path.resolve():
+        _fail("that is the vault itself; choose another path for the backup.")
+    if destination.exists() and not force:
+        _fail(f"{destination} already exists. Pass --force to replace it.")
+
+    vault, _cfg = _open_unlocked(ctx)
+    vault.write_backup(destination)
+    click.secho(
+        f"Encrypted backup of {_plural(len(vault.data.entries), 'entry', 'entries')} "
+        f"written to {destination}.",
+        fg="green",
+    )
+    click.echo(
+        "It opens with the same master password and authenticator as the vault "
+        "does now, or with your recovery key. Restore from it with 'hecate import'."
+    )
+
+
+def _read_backup(source: Path) -> list[Entry]:
+    try:
+        backup = Vault.load(source)
+    except (ValueError, KeyError, TypeError):
+        _fail(f"{source} is not a Hecate vault or backup, nor a CSV file.")
+    _authenticate(
+        source,
+        backup,
+        password_prompt="Master password for the backup",
+        code_prompt="Authenticator code for the backup",
+    )
+    return backup.data.entries
+
+
+def _describe_csv(source: Path, parsed: csv_import.CsvImport) -> None:
+    click.echo(f"Read {_plural(parsed.rows, 'row')} from {source.name}.")
+    used = ", ".join(
+        f"{column} -> {field}" for field, found in parsed.columns.items() for column in found
+    )
+    click.echo(f"Columns used: {used}")
+    if parsed.ignored_columns:
+        click.echo(click.style(f"Ignored: {', '.join(parsed.ignored_columns)}", dim=True))
+    if parsed.rows_with_totp:
+        click.secho(
+            f"Not imported: authenticator (TOTP) secrets in {_plural(parsed.rows_with_totp, 'row')}. "
+            "Hecate is not an authenticator app; keep those in yours.",
+            fg="yellow",
+        )
+    if parsed.skipped_without_password:
+        click.echo(f"Skipped: {_plural(parsed.skipped_without_password, 'row')} with no password.")
+
+
+def _offer_to_delete_plaintext(source: Path) -> None:
+    click.secho(f"warning: {source} holds its passwords in plain text.", fg="yellow")
+    if not click.confirm("Delete it now?", default=False):
+        click.echo("Delete it yourself once you have checked the import.")
+        return
+    try:
+        csv_import.remove_plaintext(source)
+    except OSError as exc:
+        _fail(f"could not delete {source} ({exc.strerror or type(exc).__name__}).")
+    click.secho(f"Deleted {source}.", fg="green")
+    click.echo(
+        click.style(
+            "It was overwritten first, but that is best effort: backups, sync "
+            "folders and the trash may still hold a copy.",
+            dim=True,
+        )
+    )
+
+
+@cli.command("import")
+@click.argument("source", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.pass_context
+def import_entries(ctx: click.Context, source: Path) -> None:
+    """Add entries from another password manager's CSV export, or a Hecate backup.
+
+    CSV columns are matched by name, so exports from Bitwarden, 1Password,
+    LastPass, KeePassXC, Proton Pass, Chrome and Firefox work as they are.
+    Existing entries are never changed: duplicates are skipped and taken
+    titles get a number. You see what will be added before anything is saved.
+    """
+    path = _vault_path(ctx)
+    if source.resolve() == path.resolve():
+        _fail("that is the vault itself.")
+
+    with open(source, "rb") as handle:
+        is_backup = handle.read(64).lstrip().startswith(b"{")
+    if is_backup:
+        incoming = _read_backup(source)
+    else:
+        try:
+            parsed = csv_import.read_csv(source)
+        except csv_import.ImportFormatError as exc:
+            _fail(str(exc))
+        _describe_csv(source, parsed)
+        incoming = parsed.entries
+
+    vault, _cfg = _open_unlocked(ctx)
+    plan = merge.plan_merge(vault.data.entries, incoming)
+
+    if plan.already_present:
+        click.echo(f"Already in the vault, skipped: {plan.already_present}.")
+    if not plan.added:
+        click.echo("Nothing new to import.")
+    else:
+        for original, new in plan.renamed:
+            click.echo(f"  {original!r} is taken; it will be added as {new!r}.")
+        count = _plural(len(plan.added), "entry", "entries")
+        if not click.confirm(f"Import {count}?", default=True):
+            click.echo("Nothing was imported.")
+            return
+        for entry in plan.added:
+            vault.add(entry)
+        vault.save()
+        click.secho(f"Imported {count}.", fg="green")
+
+        added = {entry.id for entry in plan.added}
+        shared = [
+            e for e in duplicates.entries_with_shared_passwords(vault.data.entries) if e.id in added
+        ]
+        if shared:
+            click.secho(
+                f"warning: {_plural(len(shared), 'imported entry', 'imported entries')} "
+                f"{'shares' if len(shared) == 1 else 'share'} a password with another entry.",
+                fg="yellow",
+            )
+
+    if not is_backup:
+        _offer_to_delete_plaintext(source)
 
 
 # --- breaches -------------------------------------------------------------
