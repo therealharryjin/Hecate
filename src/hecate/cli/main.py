@@ -599,13 +599,45 @@ def add(ctx: click.Context, title: str, username: str, url: str, notes: str, tag
 @cli.command("get")
 @click.argument("title")
 @click.option("--show", is_flag=True, help="Print the password to the terminal.")
+@click.option(
+    "--copy",
+    is_flag=True,
+    help="Copy the password to the clipboard, cleared again after clipboard-clear seconds.",
+)
 @click.pass_context
-def get_entry(ctx: click.Context, title: str, show: bool) -> None:
-    """Show an entry. The password is masked unless --show is given."""
-    vault, _cfg = _open_unlocked(ctx)
+def get_entry(ctx: click.Context, title: str, show: bool, copy: bool) -> None:
+    """Show an entry, with the password masked.
+
+    --copy copies the password to the clipboard without printing it; --show
+    prints it.
+    """
+    # Checked before unlocking, so nobody types a password for a copy that
+    # was never going to happen.
+    if copy and config_mod.load().clipboard_clear_seconds <= 0:
+        _fail(
+            "copying is turned off (clipboard-clear is 0). Turn it on with "
+            "'hecate config set clipboard-clear 15', or use --show."
+        )
+
+    vault, cfg = _open_unlocked(ctx)
     entry = vault.data.find(title)
     if entry is None:
         _fail(f"no entry titled {title!r}.")
+
+    if copy:
+        if not entry.password:
+            _fail(f"{entry.title!r} has no password to copy.")
+        try:
+            clipboard.copy(entry.password, clear_after=cfg.clipboard_clear_seconds)
+        except clipboard.ClipboardUnavailable:
+            _fail("no clipboard is available here. Use --show to print the password instead.")
+
+    if copy:
+        note = f"  (copied; cleared in {cfg.clipboard_clear_seconds} seconds)"
+    elif show:
+        note = ""
+    else:
+        note = "  (--show to reveal, --copy to copy)"
 
     click.echo(f"Title:    {entry.title}")
     if entry.username:
@@ -616,7 +648,7 @@ def get_entry(ctx: click.Context, title: str, show: bool) -> None:
         click.echo(f"Tags:     {', '.join(entry.tags)}")
     if entry.notes:
         click.echo(f"Notes:    {entry.notes}")
-    click.echo(f"Password: {entry.password if show else '*' * 8 + '  (--show to reveal)'}")
+    click.echo(f"Password: {entry.password if show else '*' * 8}{note}")
     click.echo(f"Modified: {entry.modified_at}")
 
 

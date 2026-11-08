@@ -48,8 +48,11 @@ def copy(secret: str, *, clear_after: int) -> None:
 
 
 def _fingerprint(text: str, pepper: bytes) -> bytes:
+    # Some backends hand text back with a trailing newline, so both sides drop
+    # trailing line breaks before comparing. Stripping only the clipboard's
+    # side would mean a stored password that ends in one is never cleared.
     return hashlib.blake2b(
-        text.encode("utf-8"), key=pepper, digest_size=_DIGEST_SIZE
+        text.rstrip("\r\n").encode("utf-8"), key=pepper, digest_size=_DIGEST_SIZE
     ).digest()
 
 
@@ -80,9 +83,7 @@ def clear_if_unchanged(pepper: bytes, digest: bytes) -> bool:
         return False
     if not current:
         return False
-    # Some backends hand text back with a trailing newline. Generated secrets
-    # never end in one, so stripping it cannot cause a false match.
-    if not hmac.compare_digest(_fingerprint(current.rstrip("\r\n"), pepper), digest):
+    if not hmac.compare_digest(_fingerprint(current, pepper), digest):
         return False
     try:
         pyperclip.copy("")

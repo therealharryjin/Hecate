@@ -11,8 +11,9 @@ will ever make is an anonymised breach check you explicitly ask for.
 
 > **Status:** early but usable. The vault core, key derivation, the two-factor
 > unlock flow with backoff on failed attempts, recovery with the recovery key,
-> unlock sessions, the entry commands, the password-reuse warning and the
-> password/passphrase generator are implemented and tested. Breach checking and import/export are not built
+> unlock sessions, the entry commands with clipboard copying, the
+> password-reuse warning and the password/passphrase generator are
+> implemented and tested. Breach checking and import/export are not built
 > yet — see [Roadmap](#roadmap).
 
 ---
@@ -54,7 +55,7 @@ hecate init                       # create the vault, enroll your authenticator,
 hecate unlock                     # master password, then a 6-digit code
 hecate add github --username me   # the password is prompted for, never typed as an argument
 hecate generate                   # a random password: printed, copied, and offered for saving
-hecate get github --show
+hecate get github --copy          # onto the clipboard, cleared again after 15 seconds
 hecate list
 hecate lock                       # end the session now
 ```
@@ -87,7 +88,7 @@ cannot be regenerated. See [Recovery](#recovery).
 | Command | Description |
 | --- | --- |
 | `hecate add TITLE` | Add an entry. Options: `--username`, `--url`, `--notes`, `--tag` (repeatable). The password is always prompted for, and you are warned before reusing one already in the vault. |
-| `hecate get TITLE` | Show an entry. The password is masked unless you pass `--show`. |
+| `hecate get TITLE` | Show an entry, with the password masked. `--copy` copies the password to the clipboard and clears it again after `clipboard-clear` seconds, without printing it. `--show` prints it. |
 | `hecate edit TITLE` | Update in place. Options: `--title` (rename), `--username`, `--url`, `--notes`, `--password` (flag; prompts, and warns on reuse), `--add-tag`, `--remove-tag`. |
 | `hecate list` | List titles and usernames. `--tag` filters. Never prints passwords. |
 | `hecate history TITLE` | Show previous passwords, newest first. Masked unless `--show`. |
@@ -97,6 +98,12 @@ Entries are looked up by exact id first, then by case-insensitive title.
 
 `add` and `edit --password` check the password you typed against the ones
 already in the vault — see [Password reuse](#password-reuse).
+
+`get --copy` is the way to use a stored password without it landing in your
+terminal's scrollback. If `clipboard-clear` is `0`, copying is off and
+`--copy` is refused before you are asked to unlock. If there is no clipboard
+(a headless Linux box without `xclip`, say), it fails with an error rather
+than appearing to succeed. See [Clipboard expiry](#clipboard-expiry).
 
 ### Generating passwords
 
@@ -179,7 +186,7 @@ Settings live in `$HECATE_HOME/config.json`, written `0600`. The backoff on
 | Setting | Default | Range | Meaning |
 | --- | --- | --- | --- |
 | `session-timeout` | `10` | 0–1440 minutes | Idle minutes before the vault re-locks. `0` disables sessions entirely, prompting on every command. |
-| `clipboard-clear` | `15` | 0–300 seconds | Seconds before a copied secret is cleared from the clipboard. `0` turns copying off, so a secret is never left there indefinitely. Only `generate` copies today. |
+| `clipboard-clear` | `15` | 0–300 seconds | Seconds before a copied secret is cleared from the clipboard. `0` turns copying off, so a secret is never left there indefinitely. Used by `generate` and `get --copy`. |
 | `generate-type` | `password` | `password`, `passphrase` | What `hecate generate` makes when you do not say. |
 | `generate-save-prompt` | `on` | `on`, `off` | Whether `hecate generate` asks to save what it made. |
 | `password-length` | `20` | 8–128 | Characters in a generated password. |
@@ -511,7 +518,8 @@ is done by a small detached helper process (`python -m hecate.clipboard`). The
 helper is never given the secret: it receives a keyed BLAKE2b fingerprint over a
 pipe (never on its command line, where other processes could see it), waits
 `clipboard-clear` seconds, and clears the clipboard only if it still holds that
-same secret. Anything you copied in the meantime is left alone.
+same secret. Anything you copied in the meantime is left alone. Both
+`generate` and `get --copy` copy this way.
 
 ---
 
@@ -589,8 +597,9 @@ same secret. Anything you copied in the meantime is left alone.
   and defaults the window to 10 minutes. Set `session-timeout` to `0` to opt
   out entirely and be prompted every time.
 
-- **The clipboard, and generated passwords on screen.** While a generated
-  password sits on the clipboard, any program running as you can read it.
+- **The clipboard, and generated passwords on screen.** While a password sits
+  on the clipboard, whether generated or copied with `get --copy`, any program
+  running as you can read it.
   Clearing is best effort: it replaces what is on the clipboard *now*, but it
   cannot reach clipboard history (Windows' Win+V, desktop clipboard managers)
   or anything you have already pasted, and if the helper process is killed
@@ -762,10 +771,10 @@ Built and tested:
 - [x] Clipboard copy with automatic clearing, for generated passwords
 - [x] Backoff on failed unlocks, for both the master password and the
       authenticator code
+- [x] Copying a stored password to the clipboard (`get --copy`)
 
 Not yet built:
 
 - [ ] `hecate check-breach` — Have I Been Pwned, k-anonymity only
 - [ ] `hecate import` / `hecate export` — encrypted backups, and CSV import
       from other managers
-- [ ] Copying a stored password to the clipboard (`get --copy`)
