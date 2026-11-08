@@ -239,6 +239,21 @@ class Vault:
         env_mod.reseal_payload(self._envelope, self._dek, self._data.serialize())
         storage.write_atomic(self.path, self._envelope.to_json())
 
+    def write_backup(self, path: Path) -> None:
+        """Write this vault, as last saved, to ``path`` as a complete vault file.
+
+        The backup is the same ciphertext under the same keys, so it opens with
+        the same master password and authenticator, or the recovery key. Only an
+        unlocked vault can be backed up, so a vault that no longer decrypts is
+        refused rather than copied. Unsaved changes are not included.
+        """
+        if not self.is_unlocked:
+            raise VaultLockedError("vault is locked")
+        path = Path(path)
+        if path.resolve() == self.path.resolve():
+            raise VaultError("refusing to write a backup over the vault itself")
+        storage.write_atomic(path, self._envelope.to_json())
+
 
 __all__ = [
     "Vault",
