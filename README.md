@@ -12,9 +12,9 @@ will ever make is an anonymised breach check you explicitly ask for.
 > **Status:** early but usable. The vault core, key derivation, the two-factor
 > unlock flow with backoff on failed attempts, recovery with the recovery key,
 > unlock sessions, the entry commands with clipboard copying, the
-> password-reuse warning and the password/passphrase generator are
-> implemented and tested. Breach checking and import/export are not built
-> yet — see [Roadmap](#roadmap).
+> password-reuse warning, the password/passphrase generator and breach
+> checking are implemented and tested. Import/export is not built yet — see
+> [Roadmap](#roadmap).
 
 ---
 
@@ -55,6 +55,7 @@ hecate init                       # create the vault, enroll your authenticator,
 hecate unlock                     # master password, then a 6-digit code
 hecate add github --username me   # the password is prompted for, never typed as an argument
 hecate generate                   # a random password: printed, copied, and offered for saving
+hecate check-breach               # has any of your passwords turned up in a known breach?
 hecate get github --copy          # onto the clipboard, cleared again after 15 seconds
 hecate list
 hecate lock                       # end the session now
@@ -154,6 +155,28 @@ optional username. If an entry with that title already exists, you are asked
 whether to replace its password; the old one moves into the entry's history, as
 with `edit --password`. Turn the question off with
 `hecate config set generate-save-prompt off`; `--save` still saves on demand.
+
+### Checking for breaches
+
+| Command | Description |
+| --- | --- |
+| `hecate check-breach` | Check every password in the vault against Have I Been Pwned's list of breached passwords, and list the entries whose password has turned up, most-seen first. |
+| `hecate check-breach TITLE` | Check one entry's password. |
+
+```
+$ hecate check-breach
+Checking 3 passwords with Have I Been Pwned. Only the first 5 characters of each SHA-1 hash are sent.
+  forum: seen 37,359,195 times
+  github (harry): seen 17,043 times
+2 of 3 passwords appear in known breaches. Change them, most-seen first.
+```
+
+This is the only command that uses the network, and it runs only when you ask.
+Passwords are never printed, only entry names. "Not found" is not proof that a
+password is strong, only that it has not turned up in a breach the service
+knows about. The command exits `0` whether or not anything was found, and `1`
+if the check could not finish. See [Breach checks](#breach-checks) for exactly
+what is sent.
 
 ### Settings
 
@@ -427,6 +450,8 @@ it does not stop.
   encrypted vault, like any other entry.
 - Anything typed at a failed unlock. The failed-unlock record holds only a
   count and a time for each vault.
+- Anything about a breach check: no results, and no hash prefixes. See
+  [Breach checks](#breach-checks) for why there is no cache.
 
 Passwords are prompted for with hidden input, never accepted as command
 arguments, so they cannot leak into shell history or `ps` output. `--password`
@@ -475,6 +500,46 @@ under a per-call random pepper, which keeps raw secrets out of dict keys and
 traceback reprs. That is hygiene only: the plaintext is already in the process
 either way, and it defends against nothing an attacker could do to a running
 Hecate. The warning is never printed with the password in it.
+
+### Breach checks
+
+`hecate check-breach` uses Have I Been Pwned's Pwned Passwords service through
+its *k-anonymity* range API. For each password:
+
+```
+  password ──SHA-1──▶ 5BAA6 1E4C9B93F3F0682250B6CF8331B7EE68FD8
+                      └─┬─┘ └───────────────┬─────────────────┘
+          sent to the service               kept on this machine
+                        │
+                        ▼
+  GET https://api.pwnedpasswords.com/range/5BAA6
+                        │
+                        ▼
+  every breached hash starting 5BAA6 (hundreds), each with a count
+                        │
+                        ▼
+  matched against the kept suffix here: found, and how often, or not found
+```
+
+- **Only 5 hex characters of each hash leave the machine.** The password and
+  its full hash never do. The client refuses to send anything but a
+  5-character prefix (`test_fetch_refuses_anything_but_a_prefix`).
+- **Replies are padded.** Each request sends `Add-Padding: true`, so the
+  service fills its reply with decoy entries and an eavesdropper cannot tell
+  from the size which prefix was asked about. Decoys have a count of 0 and are
+  ignored.
+- **One request per distinct prefix.** A password used by several entries is
+  looked up once.
+- **HTTPS with certificate checks, no redirects followed.** Anything but a
+  plain success is an error, and error messages never include the request URL.
+- **No cache, on purpose.** Nothing about a check is written to disk. A saved
+  prefix would sit outside the vault's encryption, and for a breached password
+  it narrows things down to the few hundred breached passwords sharing it.
+- **SHA-1 is used only because the service's list is keyed by it.** It
+  protects nothing here.
+
+What the service learns is covered in the
+[threat model](#what-hecate-does-not-defend-against--read-this-part).
 
 ### Generating passwords and passphrases
 
@@ -549,8 +614,9 @@ same secret. Anything you copied in the meantime is left alone. Both
   entry already uses prompts for confirmation first. It is a warning you can
   overrule, not an enforced policy, and it is checked only at the moment you
   set a password — there is no command that audits the whole vault yet.
-- **Password reuse against known breaches**, via Have I Been Pwned k-anonymity
-  (planned). Only the first 5 characters of a SHA-1 hash ever leave the machine.
+- **Passwords that have turned up in breaches.** `hecate check-breach` looks
+  them up in Have I Been Pwned by k-anonymity: only the first 5 characters of
+  each SHA-1 hash leave the machine. See [Breach checks](#breach-checks).
 
 ### What Hecate does *not* defend against — read this part
 
@@ -607,6 +673,15 @@ same secret. Anything you copied in the meantime is left alone. Both
   copy it by hand, which leaves it in your terminal's scrollback. Use
   `--no-copy`, or set `clipboard-clear` to `0`, to keep it off the clipboard.
 
+- **What a breach check tells the service.** Have I Been Pwned (served through
+  Cloudflare) sees your IP address and the 5-character prefix of each
+  password's SHA-1 hash. For a password that is *not* in a breach, the prefix
+  is shared with an enormous number of other strings and says next to nothing.
+  For one that *is*, it narrows the password down to the few hundred breached
+  passwords sharing that prefix. That is the trade k-anonymity makes. A check
+  runs only when you ask; to avoid the trade entirely, do not run
+  `check-breach`.
+
 - **Secrets in process memory.** Python cannot reliably zero secrets: `str` is
   immutable and the garbage collector copies freely. Derived keys are held in
   `bytes` and dropped on lock, but a memory dump or swap file of a running,
@@ -632,6 +707,8 @@ library, and that is a hard rule rather than a preference:
 | TOTP (RFC 6238) | `pyotp` | `pyotp.TOTP` |
 | Randomness | Python stdlib | `secrets` (never `random`) |
 | BLAKE2b, keyed | Python stdlib | `hashlib.blake2b` — fingerprints for the reuse warning and clipboard expiry, so raw secrets are never compared or handed around |
+| SHA-1 | Python stdlib | `hashlib.sha1(usedforsecurity=False)` — only to look passwords up in Have I Been Pwned, whose list is keyed by it. It protects nothing. |
+| TLS | `requests` (urllib3, `certifi` CA bundle) | Breach checks only. Certificate verification is never turned off. |
 
 ## Recovery
 
@@ -720,7 +797,8 @@ src/hecate/
 ├── cli/main.py      the click app behind the `hecate` entry point
 ├── clipboard.py     copy with a mandatory expiry; the detached clearing helper
 ├── config.py        user settings, as a declarative registry
-└── breach/          (not built yet)
+└── breach/
+    └── hibp.py      Have I Been Pwned range lookups: 5-character prefixes only, no cache
 ```
 
 The dependency direction is one-way: `crypto` knows nothing about vaults,
@@ -772,9 +850,9 @@ Built and tested:
 - [x] Backoff on failed unlocks, for both the master password and the
       authenticator code
 - [x] Copying a stored password to the clipboard (`get --copy`)
+- [x] `hecate check-breach` — Have I Been Pwned, k-anonymity only
 
 Not yet built:
 
-- [ ] `hecate check-breach` — Have I Been Pwned, k-anonymity only
 - [ ] `hecate import` / `hecate export` — encrypted backups, and CSV import
       from other managers

@@ -13,6 +13,7 @@ from .. import config as config_mod
 from .. import generator
 from ..audit import duplicates
 from ..auth import ratelimit
+from ..breach import hibp
 from ..auth import session as session_mod
 from ..auth import totp as totp_auth
 from ..crypto.aead import DecryptionError
@@ -112,6 +113,10 @@ def _open_unlocked(ctx: click.Context) -> tuple[Vault, config_mod.Config]:
     return vault, cfg
 
 
+def _entry_label(entry: Entry) -> str:
+    return f"{entry.title} ({entry.username})" if entry.username else entry.title
+
+
 def _confirm_password_reuse(
     vault: Vault, password: str, *, exclude: Entry | None = None
 ) -> bool:
@@ -135,8 +140,7 @@ def _confirm_password_reuse(
         fg="yellow",
     )
     for entry in matches:
-        label = f"{entry.title} ({entry.username})" if entry.username else entry.title
-        click.secho(f"  - {label}", fg="yellow")
+        click.secho(f"  - {_entry_label(entry)}", fg="yellow")
     click.secho(
         "Reusing it means one breach exposes every account listed above.",
         fg="yellow",
@@ -807,6 +811,79 @@ def delete(ctx: click.Context, title: str) -> None:
     vault.remove(entry)
     vault.save()
     click.secho(f"Deleted {title!r}.", fg="green")
+
+
+# --- breaches -------------------------------------------------------------
+
+
+@cli.command("check-breach")
+@click.argument("title", required=False)
+@click.pass_context
+def check_breach(ctx: click.Context, title: str | None) -> None:
+    """Check passwords against Have I Been Pwned's list of breached passwords.
+
+    Only the first 5 characters of each password's SHA-1 hash are sent; the
+    match is made on this machine. With TITLE, checks that entry; without,
+    every entry in the vault.
+    """
+    vault, _cfg = _open_unlocked(ctx)
+    if title is not None:
+        entry = vault.data.find(title)
+        if entry is None:
+            _fail(f"no entry titled {title!r}.")
+        if not entry.password:
+            _fail(f"{entry.title!r} has no password to check.")
+        entries = [entry]
+    else:
+        entries = sorted(
+            (e for e in vault.data.entries if e.password), key=lambda e: e.title.lower()
+        )
+    if not entries:
+        click.echo("No passwords to check.")
+        return
+
+    noun = "password" if len(entries) == 1 else "passwords"
+    click.echo(
+        f"Checking {len(entries)} {noun} with Have I Been Pwned. Only the first "
+        "5 characters of each SHA-1 hash are sent.",
+        err=True,
+    )
+    try:
+        counts = hibp.breach_counts([e.password for e in entries])
+    except hibp.BreachCheckError as exc:
+        _fail(f"{exc}; the check did not finish.")
+
+    found = sorted(
+        ((e, n) for e, n in zip(entries, counts) if n), key=lambda pair: -pair[1]
+    )
+    if title is not None:
+        if found:
+            click.secho(
+                f"{_entry_label(entries[0])}: seen {counts[0]:,} times in known "
+                "breaches. Change it.",
+                fg="red",
+            )
+        else:
+            click.secho(f"{_entry_label(entries[0])}: not found in known breaches.", fg="green")
+        return
+
+    if found:
+        for entry, times in found:
+            click.secho(f"  {_entry_label(entry)}: seen {times:,} times", fg="red")
+        click.secho(
+            f"{len(found)} of {len(entries)} passwords appear in known breaches. "
+            "Change them, most-seen first.",
+            fg="red",
+        )
+    else:
+        click.secho(f"None of the {len(entries)} {noun} appear in known breaches.", fg="green")
+        click.echo(
+            click.style(
+                "That is not proof of strength, only that none has turned up in a "
+                "breach Have I Been Pwned knows about.",
+                dim=True,
+            )
+        )
 
 
 if __name__ == "__main__":  # pragma: no cover
