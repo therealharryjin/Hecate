@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import sys
 from pathlib import Path
 
@@ -11,6 +12,7 @@ from .. import clipboard
 from .. import config as config_mod
 from .. import generator
 from ..audit import duplicates
+from ..auth import ratelimit
 from ..auth import session as session_mod
 from ..auth import totp as totp_auth
 from ..crypto.aead import DecryptionError
@@ -28,6 +30,66 @@ def _vault_path(ctx: click.Context) -> Path:
     return Path(override) if override else config_mod.default_vault_path()
 
 
+def _format_wait(seconds: float) -> str:
+    minutes, secs = divmod(math.ceil(seconds), 60)
+    return f"{minutes}m {secs}s" if minutes else f"{secs}s"
+
+
+def _fail_throttled(wait_seconds: float) -> None:
+    _fail(
+        f"too many failed unlock attempts; try again in {_format_wait(wait_seconds)}.\n"
+        "Lost the authenticator or forgotten the password? 'hecate recover' "
+        "takes the recovery key and does not wait."
+    )
+
+
+def _fail_attempt(path: Path, message: str) -> None:
+    """Fail an unlock attempt, which ratelimit.begin has already counted."""
+    wait = ratelimit.check(path)
+    if wait > 0:
+        message += f" Too many failed attempts: wait {_format_wait(wait)} before trying again."
+    _fail(message)
+
+
+def _authenticate(path: Path, vault: Vault, code_prompt: str = "Authenticator code") -> None:
+    """Take the master password and authenticator code, counting the attempt.
+
+    The attempt is counted as failed before either factor is checked, and
+    cleared only once both pass. A correct password alone must not clear it,
+    or knowing the password would buy unlimited guesses at the code.
+    """
+    wait = ratelimit.check(path)
+    if wait > 0:
+        _fail_throttled(wait)
+
+    password = click.prompt("Master password", hide_input=True).encode("utf-8")
+    try:
+        earlier_failures = ratelimit.begin(path)
+    except ratelimit.Throttled as exc:  # another process failed meanwhile
+        _fail_throttled(exc.wait_seconds)
+
+    try:
+        pending = vault.verify_password(password)
+    except DecryptionError:
+        _fail_attempt(path, "incorrect master password.")
+
+    code = click.prompt(code_prompt) if pending.requires_totp else None
+    try:
+        vault.complete_unlock(pending, code)
+    except InvalidTotpCodeError as exc:
+        _fail_attempt(path, f"{exc}.")
+
+    ratelimit.reset(path)
+    if earlier_failures:
+        noun = "attempt" if earlier_failures == 1 else "attempts"
+        click.secho(
+            f"warning: {earlier_failures} failed unlock {noun} since the vault was "
+            "last unlocked. If that was not you, someone else tried to get in.",
+            fg="yellow",
+            err=True,
+        )
+
+
 def _open_unlocked(ctx: click.Context) -> tuple[Vault, config_mod.Config]:
     """Return an unlocked vault, using a live session or prompting for both factors."""
     cfg = config_mod.load()
@@ -43,19 +105,7 @@ def _open_unlocked(ctx: click.Context) -> tuple[Vault, config_mod.Config]:
         session_mod.refresh(live, cfg.session_timeout_minutes)
         return vault, cfg
 
-    password = click.prompt("Master password", hide_input=True).encode("utf-8")
-    try:
-        pending = vault.verify_password(password)
-    except DecryptionError:
-        _fail("incorrect master password.")
-
-    code = None
-    if pending.requires_totp:
-        code = click.prompt("Authenticator code")
-    try:
-        vault.complete_unlock(pending, code)
-    except InvalidTotpCodeError as exc:
-        _fail(str(exc))
+    _authenticate(path, vault)
 
     if cfg.session_enabled:
         session_mod.start(path, vault.dek, cfg.session_timeout_minutes)
@@ -174,18 +224,7 @@ def enroll_authenticator(ctx: click.Context) -> None:
         _fail(f"no vault at {path}")
 
     vault = Vault.load(path)
-    password = click.prompt("Master password", hide_input=True).encode("utf-8")
-    try:
-        pending = vault.verify_password(password)
-    except DecryptionError:
-        _fail("incorrect master password.")
-    if pending.requires_totp:
-        try:
-            vault.complete_unlock(pending, click.prompt("Current authenticator code"))
-        except InvalidTotpCodeError as exc:
-            _fail(str(exc))
-    else:
-        vault.complete_unlock(pending)
+    _authenticate(path, vault, code_prompt="Current authenticator code")
 
     secret = _enroll_new_authenticator("the vault is unchanged.")
     vault.enroll_totp(secret)
@@ -231,6 +270,9 @@ def recover(ctx: click.Context, no_totp: bool) -> None:
     vault.reset_credentials(recovery_key, password, totp_secret=secret)
     vault.save()
     session_mod.clear()
+    # Holding the recovery key settles who owns the vault, and the old
+    # credentials the failures were made against are gone.
+    ratelimit.reset(path)
 
     replaced = "Master password" if no_totp else "Master password and authenticator"
     click.secho(f"{replaced} replaced. Existing sessions were ended.", fg="green")
@@ -269,11 +311,17 @@ def lock() -> None:
 @cli.command()
 @click.pass_context
 def status(ctx: click.Context) -> None:
-    """Show whether the vault is currently unlocked."""
+    """Show whether the vault is unlocked, and any failed unlock attempts."""
     cfg = config_mod.load()
     path = _vault_path(ctx)
     click.echo(f"Vault:           {path}{'' if path.exists() else ' (does not exist)'}")
     click.echo(f"Session timeout: {cfg.session_timeout_minutes} min")
+
+    attempts = ratelimit.status(path)
+    if attempts.failures:
+        wait = attempts.wait_seconds()
+        when = f"next attempt in {_format_wait(wait)}" if wait > 0 else "next attempt allowed now"
+        click.secho(f"Failed unlocks:  {attempts.failures} ({when})", fg="yellow")
 
     live = session_mod.load(path) if cfg.session_enabled else None
     if live is None:
