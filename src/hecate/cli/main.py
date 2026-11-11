@@ -243,6 +243,76 @@ def enroll_authenticator(ctx: click.Context) -> None:
     click.secho("Authenticator enrolled. Existing sessions were ended.", fg="green")
 
 
+@cli.command("remove-authenticator")
+@click.pass_context
+def remove_authenticator(ctx: click.Context) -> None:
+    """Stop asking for an authenticator code when unlocking.
+
+    Requires the master password and a code from the current authenticator.
+    Afterwards the master password alone unlocks the vault.
+    """
+    path = _vault_path(ctx)
+    if not path.exists():
+        _fail(f"no vault at {path}")
+
+    vault = Vault.load(path)
+    _authenticate(path, vault, code_prompt="Current authenticator code")
+    if not vault.has_authenticator:
+        click.echo("This vault has no authenticator to remove; nothing was changed.")
+        return
+
+    click.secho(
+        "warning: after this, anyone with the master password can unlock the vault.",
+        fg="yellow",
+    )
+    if not click.confirm("Remove the authenticator?", default=False):
+        click.echo("Nothing was changed.")
+        return
+
+    vault.disable_totp()
+    vault.save()
+    session_mod.clear()
+    click.secho("Authenticator removed. Existing sessions were ended.", fg="green")
+    click.echo(
+        "Its codes no longer do anything, so you can delete the Hecate entry from "
+        "your authenticator app. 'hecate enroll-authenticator' adds one again."
+    )
+
+
+@cli.command("change-password")
+@click.pass_context
+def change_master_password(ctx: click.Context) -> None:
+    """Change the master password.
+
+    Requires the current master password and authenticator code, even during
+    a live session. The authenticator and the recovery key do not change.
+    Forgotten the current password? Use 'hecate recover'.
+    """
+    path = _vault_path(ctx)
+    if not path.exists():
+        _fail(f"no vault at {path}")
+
+    vault = Vault.load(path)
+    _authenticate(path, vault, password_prompt="Current master password")
+
+    password = click.prompt(
+        "New master password", hide_input=True, confirmation_prompt=True
+    ).encode("utf-8")
+    try:
+        vault.change_password(password)
+    except VaultError as exc:
+        _fail(f"{exc}; nothing was changed.")
+    vault.save()
+    session_mod.clear()
+
+    click.secho("Master password changed. Existing sessions were ended.", fg="green")
+    click.echo(
+        "Your authenticator and recovery key have not changed. Backups, and any "
+        "other copy of the vault file made before now, still open with the old "
+        "master password."
+    )
+
+
 @cli.command()
 @click.option(
     "--no-totp",

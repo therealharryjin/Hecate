@@ -15,6 +15,7 @@ in README.md's threat model.
 from __future__ import annotations
 
 import dataclasses
+import hmac
 from pathlib import Path
 
 from ..auth import totp as totp_auth
@@ -219,11 +220,57 @@ class Vault:
         self._reseal_keyring(totp_secret=secret)
 
     def disable_totp(self) -> None:
+        """Remove the authenticator, so the master password alone unlocks."""
         if not self.is_unlocked:
             raise VaultLockedError("vault is locked")
         if self._master_key is None:
             raise VaultError("disabling the authenticator requires the master password")
         self._reseal_keyring(totp_secret=None)
+
+    @property
+    def has_authenticator(self) -> bool:
+        """Whether unlocking asks for an authenticator code.
+
+        The answer is inside the keyring, so this needs an unlock that went
+        through the master password.
+        """
+        if not self.is_unlocked:
+            raise VaultLockedError("vault is locked")
+        if self._master_key is None:
+            raise VaultError("checking for an authenticator requires the master password")
+        return env_mod.open_keyring(self._envelope, self._master_key).totp_secret is not None
+
+    # -- changing the master password ------------------------------------
+
+    def change_password(self, new_password: bytes) -> None:
+        """Seal the keyring under a new master password.
+
+        Requires an unlock that went through the current master password. The
+        authenticator stays enrolled, and the DEK, the recovery key and the
+        entries do not change. Nothing is written until :meth:`save`.
+
+        The master salt and the Argon2id parameters stay the same. Both are in
+        the header, which is every ciphertext's AAD, so changing either would
+        mean re-sealing the recovery wrap, and only the recovery key can do that
+        (see :meth:`reset_credentials`). Raises :class:`VaultError` if the new
+        password is the current one.
+        """
+        if not self.is_unlocked:
+            raise VaultLockedError("vault is locked")
+        if self._master_key is None:
+            raise VaultError(
+                "changing the master password requires unlocking with the current "
+                "master password"
+            )
+        totp_secret = env_mod.open_keyring(self._envelope, self._master_key).totp_secret
+        new_key = kdf.derive_master_key(
+            new_password, self._envelope.master_salt, self._envelope.params
+        )
+        # Same salt and parameters, so the same password gives the same key.
+        if hmac.compare_digest(new_key, self._master_key):
+            raise VaultError("the new master password is the same as the current one")
+        env_mod.seal_keyring(self._envelope, new_key, self.dek, totp_secret)
+        self._master_key = new_key
 
     def _reseal_keyring(self, *, totp_secret: str | None) -> None:
         assert self._dek is not None and self._master_key is not None

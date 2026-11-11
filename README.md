@@ -10,7 +10,8 @@ server, no account, no sync, and no telemetry. The only network request Hecate
 will ever make is an anonymised breach check you explicitly ask for.
 
 > **Status:** early but usable. The vault core, key derivation, the two-factor
-> unlock flow with backoff on failed attempts, recovery with the recovery key,
+> unlock flow with backoff on failed attempts, changing the master password and
+> the authenticator, recovery with the recovery key,
 > unlock sessions, the entry commands with clipboard copying, the
 > password-reuse warning, the password/passphrase generator, breach checking,
 > encrypted backups and importing from other managers are implemented and
@@ -75,7 +76,9 @@ cannot be regenerated. See [Recovery](#recovery).
 | Command | Description |
 | --- | --- |
 | `hecate init` | Create the vault, enroll an authenticator, print the recovery key once. `--no-totp` skips enrollment and creates a password-only vault. |
+| `hecate change-password` | Change the master password. Asks for the current master password and authenticator code first, even while a session is live; wrong answers count as [failed unlocks](#failed-unlocks). The authenticator and the recovery key do not change. Ends any live session. Older copies of the vault file, backups included, still open with the old password — see [Changing the master password](#changing-the-master-password). Forgotten the current one? Use `recover`. |
 | `hecate enroll-authenticator` | Add or replace the authenticator used to unlock the vault. Requires the master password and, if one is enrolled, a code from the current authenticator — if you have lost it, use `recover`. Wrong answers count as [failed unlocks](#failed-unlocks). Ends any live session. |
+| `hecate remove-authenticator` | Stop asking for an authenticator code, so the master password alone unlocks the vault. Requires the master password and a code from the current authenticator (wrong answers count as [failed unlocks](#failed-unlocks)), then asks for confirmation, defaulting to no. Ends any live session. `enroll-authenticator` adds one again. |
 | `hecate recover` | Get back in with the recovery key after losing the authenticator, forgetting the master password, or both. Sets a master password (a new one, or the old one again), enrolls a new authenticator, and ends any live session. `--no-totp` finishes with a password-only vault. The recovery key itself does not change. Never makes you wait after failed unlocks, and clears their count. See [Recovery](#recovery). |
 
 ### Session
@@ -295,9 +298,11 @@ secret. Using Argon2id there would be cargo-culting.
 **Why wrap rather than derive.** If the DEK were derived from your password,
 changing the password would mean a new DEK and re-encrypting every entry under
 it. Wrapping means the DEK never has to change: setting a new password with
-`hecate recover` re-wraps the same DEK. (Recovery does re-seal the entries too,
-under that same DEK, because the new password's fresh salt changes the
-authenticated header — see [Recovery](#recovery).)
+`hecate change-password` or `hecate recover` re-wraps the same DEK. (Recovery
+re-seals the entries too, under that same DEK, because the new password's
+fresh salt changes the authenticated header — see [Recovery](#recovery).
+`change-password` keeps the salt, so it re-seals only the keyring — see
+[Changing the master password](#changing-the-master-password).)
 
 ### The vault file
 
@@ -425,8 +430,8 @@ right password is not checked. The rules:
   a guess through uncounted. The count is updated under an exclusive file lock
   (`fcntl`, on Linux and macOS), so attempts started at the same moment are all
   counted too.
-- **`enroll-authenticator` counts the same way**, since it asks for the same
-  password and code.
+- **`change-password`, `enroll-authenticator` and `remove-authenticator`
+  count the same way**, since they ask for the same password and code.
 - **`recover` never waits**, and a successful recovery clears the count. The
   recovery key is 160 bits, far too many to guess, so there is nothing to slow
   down.
@@ -448,6 +453,44 @@ length.
 This slows guessing *through Hecate's prompts* and nothing else. See the
 [threat model](#what-hecate-does-not-defend-against--read-this-part) for what
 it does not stop.
+
+### Changing the master password
+
+`hecate change-password` asks for the current master password and
+authenticator code, then a new password twice. It asks even while a session is
+live: a session holds the DEK but not the key the password derives, and it is
+no proof of who is at the keyboard. A new password that is the same as the
+current one is refused. Nothing is written until every answer has been
+accepted, and any live session is ended.
+
+Only the keyring changes: it is re-sealed under the key the new password
+derives, with a fresh nonce. The DEK, the entries, the authenticator, the
+recovery wrap and the recovery key stay as they were.
+
+**The master salt does not change.** This is a deliberate difference from
+`recover`. The salt is part of the header that every ciphertext authenticates,
+so a new salt means re-sealing the recovery wrap as well, and only the recovery
+key can do that. The cost: someone holding a copy of the vault file from before
+the change *and* one from after can test each password guess against both for
+the price of one Argon2id derivation. With `recover`, which gives the password
+a fresh salt, each guess costs two.
+
+**What it protects against, and what it does not.** It shuts out someone who
+learned your old master password but has no copy of your vault file — the
+shoulder-surfing case. It does not shut out someone who already has a copy of
+the file from before the change, and it cannot. That copy still opens with the
+old password, the same as a [backup](#backups) does. The DEK does not change
+either, so the DEK from that copy also decrypts every later version of the
+vault file they get hold of. Rotating the DEK would need the recovery key, and
+Hecate has no command for that. If you think someone has both your old
+password and a copy of the file, the only remedy today is a new vault.
+
+`hecate remove-authenticator` re-seals the keyring under the same key without
+the authenticator's secret, after asking for the master password, a current
+code and a confirmation. It gives up the protection the code buys against
+someone who has watched you type the master password (see the
+[threat model](#what-hecate-defends-against)). Against an attacker with the
+vault file it changes nothing, because the code never protected against that.
 
 ### What is never written to disk
 
@@ -758,12 +801,20 @@ same secret. Anything you copied in the meantime is left alone. Both
 
 - **Backups, and the files you import from.** A backup is exactly as strong as
   the vault it came from, so store it like the vault. It keeps opening with
-  the master password it was made under, even after `recover` sets a new one,
-  and with the recovery key for good: retiring a password does not retire old
-  backups. A CSV export from another manager is plain text from the moment
+  the master password it was made under, even after `change-password` or
+  `recover` sets a new one, and with the recovery key for good: retiring a
+  password does not retire old backups. A CSV export from another manager is plain text from the moment
   that manager writes it. Hecate offers to delete it after importing, but
   deletion is best effort, and copies in backups, sync folders or the trash
   are out of its reach.
+
+- **Someone with your old master password and an old copy of the vault.**
+  Changing the master password does not change the DEK. A copy of the vault
+  file from before the change still opens with the old password, and the DEK
+  it yields decrypts every later version of the file too. A password change
+  shuts out someone who knows the old password but has no copy of the file;
+  against someone who has both, the only remedy is a new vault. See
+  [Changing the master password](#changing-the-master-password).
 
 - **What a breach check tells the service.** Have I Been Pwned (served through
   Cloudflare) sees your IP address and the 5-character prefix of each
@@ -836,6 +887,9 @@ If you lose your authenticator, forget your master password, or both:
 hecate recover
 ```
 
+(If you still have both and only want a new password, `hecate
+change-password` does that without the recovery key.)
+
 It asks for the recovery key (hidden input; spaces, dashes and case do not
 matter), then for a master password — a new one, or your old one if you still
 know it — and then enrolls a new authenticator the same way `init` does. Pass
@@ -878,7 +932,7 @@ src/hecate/
 │   ├── envelope.py  the key hierarchy: wrapping, unwrapping, header binding
 │   ├── model.py     Entry and VaultData; password history lives here
 │   ├── storage.py   atomic writes, fsync, 0600 at open() time
-│   └── vault.py     lifecycle: create, two-stage unlock, enroll, save, back up
+│   └── vault.py     lifecycle: create, two-stage unlock, enroll, change password, save, back up
 ├── auth/
 │   ├── totp.py      enrollment URIs and code verification, via pyotp
 │   ├── session.py   the idle-window session file
@@ -946,6 +1000,9 @@ Built and tested:
 - [x] Entry commands: add, get, edit, list, history, delete
 - [x] Password-reuse warning when adding or changing a password
 - [x] Recovery with the recovery key: `hecate recover`
+- [x] Changing the master password without the recovery key
+      (`hecate change-password`), and removing the authenticator
+      (`hecate remove-authenticator`)
 - [x] `hecate generate` — passwords and EFF-wordlist passphrases, configurable,
       with exact entropy figures and an offer to save
 - [x] Clipboard copy with automatic clearing, for generated passwords
