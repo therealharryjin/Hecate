@@ -1,7 +1,8 @@
 """`hecate change-password` and `hecate remove-authenticator`.
 
-Both check the current master password and authenticator code first, through
-the same throttled path as `unlock`, even when a session is live. A wrong
+Both check the current master password and, if one is enrolled, the
+authenticator code first, through the same throttled path as `unlock`, even
+when a session is live. A wrong
 answer, a mistyped confirmation or a "no" must leave the vault file untouched.
 """
 
@@ -184,6 +185,14 @@ def test_a_backup_from_before_keeps_the_old_password(runner, vault, tmp_path):
     old = Vault.load(backup)
     old.complete_unlock(old.verify_password(PASSWORD.encode()), totp_auth.current_code(secret))
     assert old.data.find("github").password == "hunter2"
+
+
+def test_a_password_only_vault_is_not_asked_for_a_code(runner, tmp_path):
+    path, _ = _make_vault(tmp_path / "plain.hecate", totp=False)
+    result = _run(runner, path, "change-password", answers=[PASSWORD, NEW_PASSWORD, NEW_PASSWORD])
+    assert result.exit_code == 0, result.output
+    assert "Authenticator code" not in result.output
+    assert _unlock(runner, path, NEW_PASSWORD).exit_code == 0
 
 
 def test_change_password_without_a_vault(runner, tmp_path):

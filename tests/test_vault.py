@@ -465,6 +465,18 @@ def test_changed_vault_still_detects_tampering(vault_path):
         Vault.load(vault_path).verify_password(NEW_PASSWORD)
 
 
+def test_verify_password_runs_argon2id_once(vault_path, monkeypatch):
+    """The two-stage unlock exists so the password's cost is paid once."""
+    Vault.create(vault_path, PASSWORD, params=FAST)
+    calls = []
+    real = kdf.derive_master_key
+    monkeypatch.setattr(
+        kdf, "derive_master_key", lambda *args: calls.append(1) or real(*args)
+    )
+    Vault.load(vault_path).verify_password(PASSWORD)
+    assert len(calls) == 1
+
+
 # --- removing the authenticator -------------------------------------------
 
 

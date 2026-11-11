@@ -76,7 +76,7 @@ cannot be regenerated. See [Recovery](#recovery).
 | Command | Description |
 | --- | --- |
 | `hecate init` | Create the vault, enroll an authenticator, print the recovery key once. `--no-totp` skips enrollment and creates a password-only vault. |
-| `hecate change-password` | Change the master password. Asks for the current master password and authenticator code first, even while a session is live; wrong answers count as [failed unlocks](#failed-unlocks). The authenticator and the recovery key do not change. Ends any live session. Older copies of the vault file, backups included, still open with the old password — see [Changing the master password](#changing-the-master-password). Forgotten the current one? Use `recover`. |
+| `hecate change-password` | Change the master password. Asks for the current master password and, if one is enrolled, an authenticator code first, even while a session is live; wrong answers count as [failed unlocks](#failed-unlocks). The authenticator and the recovery key do not change. Ends any live session. Older copies of the vault file, backups included, still open with the old password — see [Changing the master password](#changing-the-master-password). Forgotten the current one? Use `recover`. |
 | `hecate enroll-authenticator` | Add or replace the authenticator used to unlock the vault. Requires the master password and, if one is enrolled, a code from the current authenticator — if you have lost it, use `recover`. Wrong answers count as [failed unlocks](#failed-unlocks). Ends any live session. |
 | `hecate remove-authenticator` | Stop asking for an authenticator code, so the master password alone unlocks the vault. Requires the master password and a code from the current authenticator (wrong answers count as [failed unlocks](#failed-unlocks)), then asks for confirmation, defaulting to no. Ends any live session. `enroll-authenticator` adds one again. |
 | `hecate recover` | Get back in with the recovery key after losing the authenticator, forgetting the master password, or both. Sets a master password (a new one, or the old one again), enrolls a new authenticator, and ends any live session. `--no-totp` finishes with a password-only vault. The recovery key itself does not change. Never makes you wait after failed unlocks, and clears their count. See [Recovery](#recovery). |
@@ -456,8 +456,8 @@ it does not stop.
 
 ### Changing the master password
 
-`hecate change-password` asks for the current master password and
-authenticator code, then a new password twice. It asks even while a session is
+`hecate change-password` asks for the current master password and, if one is
+enrolled, an authenticator code, then a new password twice. It asks even while a session is
 live: a session holds the DEK but not the key the password derives, and it is
 no proof of who is at the keyboard. A new password that is the same as the
 current one is refused. Nothing is written until every answer has been
@@ -803,8 +803,9 @@ same secret. Anything you copied in the meantime is left alone. Both
   the vault it came from, so store it like the vault. It keeps opening with
   the master password it was made under, even after `change-password` or
   `recover` sets a new one, and with the recovery key for good: retiring a
-  password does not retire old backups. A CSV export from another manager is plain text from the moment
-  that manager writes it. Hecate offers to delete it after importing, but
+  password does not retire old backups. A CSV export from another manager is
+  plain text from the moment that manager writes it. Hecate offers to delete
+  it after importing, but
   deletion is best effort, and copies in backups, sync folders or the trash
   are out of its reach.
 

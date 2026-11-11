@@ -98,11 +98,15 @@ class Vault:
     # -- unlocking -------------------------------------------------------
 
     def verify_password(self, password: bytes) -> PendingUnlock:
-        """Stage 1. Raises :class:`DecryptionError` if the password is wrong."""
-        keyring = env_mod.unwrap_with_password(self._envelope, password)
+        """Stage 1. Raises :class:`DecryptionError` if the password is wrong.
+
+        Runs Argon2id once: the key it derives both opens the keyring and is
+        kept for re-sealing it later.
+        """
         master_key = kdf.derive_master_key(
             password, self._envelope.master_salt, self._envelope.params
         )
+        keyring = env_mod.open_keyring(self._envelope, master_key)
         return PendingUnlock(keyring=keyring, master_key=master_key)
 
     def complete_unlock(self, pending: PendingUnlock, code: str | None = None) -> None:
@@ -210,21 +214,15 @@ class Vault:
         Requires an unlock that went through the master password, because the
         keyring must be re-sealed under the master key.
         """
-        if not self.is_unlocked:
-            raise VaultLockedError("vault is locked")
-        if self._master_key is None:
-            raise VaultError(
-                "enrolling an authenticator requires unlocking with the master "
-                "password, not the recovery key"
-            )
+        self._require_master_key(
+            "enrolling an authenticator requires unlocking with the master "
+            "password, not the recovery key"
+        )
         self._reseal_keyring(totp_secret=secret)
 
     def disable_totp(self) -> None:
         """Remove the authenticator, so the master password alone unlocks."""
-        if not self.is_unlocked:
-            raise VaultLockedError("vault is locked")
-        if self._master_key is None:
-            raise VaultError("disabling the authenticator requires the master password")
+        self._require_master_key("disabling the authenticator requires the master password")
         self._reseal_keyring(totp_secret=None)
 
     @property
@@ -234,11 +232,10 @@ class Vault:
         The answer is inside the keyring, so this needs an unlock that went
         through the master password.
         """
-        if not self.is_unlocked:
-            raise VaultLockedError("vault is locked")
-        if self._master_key is None:
-            raise VaultError("checking for an authenticator requires the master password")
-        return env_mod.open_keyring(self._envelope, self._master_key).totp_secret is not None
+        master_key = self._require_master_key(
+            "checking for an authenticator requires the master password"
+        )
+        return env_mod.open_keyring(self._envelope, master_key).totp_secret is not None
 
     # -- changing the master password ------------------------------------
 
@@ -255,22 +252,32 @@ class Vault:
         (see :meth:`reset_credentials`). Raises :class:`VaultError` if the new
         password is the current one.
         """
-        if not self.is_unlocked:
-            raise VaultLockedError("vault is locked")
-        if self._master_key is None:
-            raise VaultError(
-                "changing the master password requires unlocking with the current "
-                "master password"
-            )
-        totp_secret = env_mod.open_keyring(self._envelope, self._master_key).totp_secret
+        current_key = self._require_master_key(
+            "changing the master password requires unlocking with the current "
+            "master password"
+        )
+        totp_secret = env_mod.open_keyring(self._envelope, current_key).totp_secret
         new_key = kdf.derive_master_key(
             new_password, self._envelope.master_salt, self._envelope.params
         )
         # Same salt and parameters, so the same password gives the same key.
-        if hmac.compare_digest(new_key, self._master_key):
+        if hmac.compare_digest(new_key, current_key):
             raise VaultError("the new master password is the same as the current one")
         env_mod.seal_keyring(self._envelope, new_key, self.dek, totp_secret)
         self._master_key = new_key
+
+    def _require_master_key(self, refusal: str) -> bytes:
+        """Return K_master, or refuse unless the master password opened the vault.
+
+        Anything that re-seals or reads the keyring needs this key. A session
+        or the recovery key opens the vault without it, so they are refused
+        with ``refusal``.
+        """
+        if not self.is_unlocked:
+            raise VaultLockedError("vault is locked")
+        if self._master_key is None:
+            raise VaultError(refusal)
+        return self._master_key
 
     def _reseal_keyring(self, *, totp_secret: str | None) -> None:
         assert self._dek is not None and self._master_key is not None

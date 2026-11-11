@@ -284,9 +284,10 @@ def remove_authenticator(ctx: click.Context) -> None:
 def change_master_password(ctx: click.Context) -> None:
     """Change the master password.
 
-    Requires the current master password and authenticator code, even during
-    a live session. The authenticator and the recovery key do not change.
-    Forgotten the current password? Use 'hecate recover'.
+    Requires the current master password and, if one is enrolled, a code from
+    the authenticator, even during a live session. The authenticator and the
+    recovery key do not change. Forgotten the current password? Use 'hecate
+    recover'.
     """
     path = _vault_path(ctx)
     if not path.exists():
