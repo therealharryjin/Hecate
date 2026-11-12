@@ -375,6 +375,134 @@ def test_reset_vault_still_detects_tampering(vault_path):
         tampered.unlock_with_recovery_key(recovery_key)
 
 
+# --- changing the master password -----------------------------------------
+
+
+def _unlocked_with_totp(vault_path):
+    """A saved vault behind password + TOTP holding one entry, left unlocked."""
+    secret = totp_auth.generate_secret()
+    vault, recovery_key = Vault.create(
+        vault_path, PASSWORD, totp_secret=secret, params=FAST
+    )
+    vault.complete_unlock(vault.verify_password(PASSWORD), totp_auth.current_code(secret))
+    vault.add(Entry(title="github", password="hunter2"))
+    vault.save()
+    return vault, secret, recovery_key
+
+
+def test_change_password_replaces_the_master_password(vault_path):
+    vault, secret, _ = _unlocked_with_totp(vault_path)
+    vault.change_password(NEW_PASSWORD)
+    vault.save()
+
+    with pytest.raises(DecryptionError):
+        Vault.load(vault_path).verify_password(PASSWORD)
+    reopened = Vault.load(vault_path)
+    pending = reopened.verify_password(NEW_PASSWORD)
+    assert pending.requires_totp  # the authenticator stays enrolled
+    reopened.complete_unlock(pending, totp_auth.current_code(secret))
+    assert reopened.data.find("github").password == "hunter2"
+
+
+def test_change_password_reseals_only_the_keyring(vault_path):
+    """The header is every ciphertext's AAD, so it must not move."""
+    vault, _, _ = _unlocked_with_totp(vault_path)
+    before = json.loads(vault_path.read_bytes())
+    vault.change_password(NEW_PASSWORD)
+    vault.save()
+    after = json.loads(vault_path.read_bytes())
+
+    for field in ("format", "version", "kdf", "master_salt", "recovery_salt", "recovery"):
+        assert after[field] == before[field]
+    assert after["keyring"]["nonce"] != before["keyring"]["nonce"]
+
+
+def test_recovery_key_still_works_after_a_password_change(vault_path):
+    vault, _, recovery_key = _unlocked_with_totp(vault_path)
+    vault.change_password(NEW_PASSWORD)
+    vault.save()
+
+    again = Vault.load(vault_path)
+    again.unlock_with_recovery_key(recovery_key)
+    assert again.data.find("github").password == "hunter2"
+
+
+def test_the_same_password_is_refused(vault_path):
+    vault, _, _ = _unlocked_with_totp(vault_path)
+    keyring = vault._envelope.keyring
+    with pytest.raises(VaultError, match="same as the current one"):
+        vault.change_password(PASSWORD)
+    assert vault._envelope.keyring is keyring
+
+
+def test_change_password_needs_the_current_password(vault_path):
+    """A session or the recovery key opens the vault but holds no K_master."""
+    unlocked, _, recovery_key = _unlocked_with_totp(vault_path)
+
+    with pytest.raises(VaultLockedError):
+        Vault.load(vault_path).change_password(NEW_PASSWORD)
+
+    by_recovery = Vault.load(vault_path)
+    by_recovery.unlock_with_recovery_key(recovery_key)
+    with pytest.raises(VaultError, match="current master password"):
+        by_recovery.change_password(NEW_PASSWORD)
+
+    by_session = Vault.load(vault_path)
+    by_session.unlock_with_dek(unlocked.dek)
+    with pytest.raises(VaultError, match="current master password"):
+        by_session.change_password(NEW_PASSWORD)
+
+
+def test_changed_vault_still_detects_tampering(vault_path):
+    vault, _, _ = _unlocked_with_totp(vault_path)
+    vault.change_password(NEW_PASSWORD)
+    vault.save()
+
+    document = json.loads(vault_path.read_bytes())
+    document["kdf"]["memory_cost"] = 8
+    vault_path.write_bytes(json.dumps(document).encode())
+    with pytest.raises(DecryptionError):
+        Vault.load(vault_path).verify_password(NEW_PASSWORD)
+
+
+def test_verify_password_runs_argon2id_once(vault_path, monkeypatch):
+    """The two-stage unlock exists so the password's cost is paid once."""
+    Vault.create(vault_path, PASSWORD, params=FAST)
+    calls = []
+    real = kdf.derive_master_key
+    monkeypatch.setattr(
+        kdf, "derive_master_key", lambda *args: calls.append(1) or real(*args)
+    )
+    Vault.load(vault_path).verify_password(PASSWORD)
+    assert len(calls) == 1
+
+
+# --- removing the authenticator -------------------------------------------
+
+
+def test_disable_totp_leaves_a_password_only_vault(vault_path):
+    vault, _, recovery_key = _unlocked_with_totp(vault_path)
+    assert vault.has_authenticator
+    vault.disable_totp()
+    vault.save()
+
+    reopened = Vault.load(vault_path)
+    pending = reopened.verify_password(PASSWORD)
+    assert not pending.requires_totp
+    reopened.complete_unlock(pending)
+    assert not reopened.has_authenticator
+    assert reopened.data.find("github").password == "hunter2"
+    Vault.load(vault_path).unlock_with_recovery_key(recovery_key)
+
+
+def test_has_authenticator_needs_the_master_password(vault_path):
+    _, _, recovery_key = _unlocked_with_totp(vault_path)
+    by_recovery = Vault.load(vault_path)
+    by_recovery.unlock_with_recovery_key(recovery_key)
+    with pytest.raises(VaultError):
+        _ = by_recovery.has_authenticator
+
+
 # --- storage hygiene ------------------------------------------------------
 
 

@@ -178,8 +178,16 @@ def _recovery_plaintext(dek: bytes) -> bytes:
 def unwrap_with_password(envelope: Envelope, password: bytes) -> Keyring:
     """Unwrap the keyring. Raises :class:`~hecate.crypto.aead.DecryptionError`."""
     k_master = kdf.derive_master_key(password, envelope.master_salt, envelope.params)
+    return open_keyring(envelope, k_master)
+
+
+def open_keyring(envelope: Envelope, master_key: bytes) -> Keyring:
+    """Unwrap the keyring with an already derived ``K_master``.
+
+    Raises :class:`~hecate.crypto.aead.DecryptionError` for the wrong key.
+    """
     plain = aead.decrypt(
-        k_master, envelope.keyring.nonce, envelope.keyring.ciphertext, envelope.aad()
+        master_key, envelope.keyring.nonce, envelope.keyring.ciphertext, envelope.aad()
     )
     data = json.loads(plain.decode("utf-8"))
     return Keyring(dek=_b64d(data["dek"]), totp_secret=data.get("totp_secret"))
@@ -212,7 +220,9 @@ def seal_keyring(
     """Re-seal the keyring in place under ``master_key``.
 
     Used when enrolling or removing an authenticator, which changes the
-    keyring's contents but not the DEK or the payload.
+    keyring's contents, and when changing the master password, which changes
+    the key it is sealed under. Neither touches the DEK, the header or the
+    other two ciphertexts.
     """
     envelope.keyring = _Blob(
         *aead.encrypt(master_key, _keyring_plaintext(dek, totp_secret), envelope.aad())
